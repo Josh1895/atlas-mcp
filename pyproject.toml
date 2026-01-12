@@ -1,0 +1,53 @@
+[project]
+name = "atlas-mcp"
+version = "0.1.0"
+description = "ATLAS: Aggregate Testing, Learning, and Agentic Synthesis - MCP Server for code generation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Josh", email = "josh@example.com" }
+]
+keywords = ["mcp", "llm", "code-generation", "gemini", "ai"]
+
+dependencies = [
+    "mcp>=1.0.0",
+    "google-genai>=0.3.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.27.0",
+    "gitpython>=3.1.0",
+    "python-dotenv>=1.0.0",
+    "unidiff>=0.7.0",
+    "ddgs>=8.0.0",  # MIT licensed, free web search (DuckDuckGo)
+]
+
+[project.optional-dependencies]
+sandbox = [
+    "docker>=7.0.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+atlas = "atlas.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/atlas"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
