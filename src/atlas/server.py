@@ -14,6 +14,10 @@ from mcp.server.fastmcp import FastMCP
 from atlas.core.config import Config, get_config
 from atlas.core.orchestrator import ATLASOrchestrator, get_orchestrator
 from atlas.core.task import TaskSubmission, TaskStatus
+from atlas.core.dag_orchestrator import (
+    TaskDAGSubmission,
+    get_dag_orchestrator,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -113,6 +117,78 @@ async def solve_issue(
             "status": "error",
             "error": str(e),
         }
+
+
+@mcp.tool()
+async def solve_feature_dag(
+    repo_url: str,
+    description: str,
+    branch: str = "main",
+    base_commit: str | None = None,
+    max_tasks: int = 12,
+    max_cost_usd: float = 10.0,
+    timeout_minutes: int = 60,
+    keywords: list[str] | None = None,
+    component_names: list[str] | None = None,
+    test_command: str | None = None,
+) -> dict[str, Any]:
+    """Solve a feature request using TaskDAG decomposition and assembly."""
+    submission = TaskDAGSubmission(
+        description=description,
+        repository_url=repo_url,
+        branch=branch,
+        base_commit=base_commit,
+        max_tasks=max_tasks,
+        max_cost_usd=max_cost_usd,
+        timeout_minutes=timeout_minutes,
+        keywords=keywords or [],
+        component_names=component_names or [],
+        test_command=test_command,
+    )
+
+    orchestrator = get_dag_orchestrator()
+
+    try:
+        result = await asyncio.wait_for(
+            orchestrator.solve(submission),
+            timeout=timeout_minutes * 60,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "task_id": submission.task_id,
+            "status": "timeout",
+            "error": f"Task timed out after {timeout_minutes} minutes",
+        }
+
+    dag_summary = []
+    if result.dag:
+        for task_id, task in result.dag.tasks.items():
+            dag_summary.append({
+                "task_id": task_id,
+                "title": task.title,
+                "dependencies": task.dependencies,
+            })
+
+    task_results_summary = {
+        task_id: {
+            "selected_patch_id": task_result.selected_patch_id,
+            "candidate_count": len(task_result.candidates),
+            "oracle_count": len(task_result.oracles),
+            "errors": task_result.errors,
+        }
+        for task_id, task_result in result.task_results.items()
+    }
+
+    return {
+        "task_id": result.task_id,
+        "status": result.status,
+        "final_patch": result.final_patch,
+        "cost_usd": result.cost_usd,
+        "duration_seconds": result.duration_seconds,
+        "dag": dag_summary,
+        "task_results": task_results_summary,
+        "errors": result.errors,
+    }
 
 
 @mcp.tool()

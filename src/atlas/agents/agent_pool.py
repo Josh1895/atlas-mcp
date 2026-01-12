@@ -239,6 +239,7 @@ class AgentPoolManager:
         context = AgentContext(
             task=base_context.task,
             repository_content=base_context.repository_content,
+            repo_tools=base_context.repo_tools,
             rag_context=rag_context,
             web_search_context=web_search_context,
             additional_context=base_context.additional_context,

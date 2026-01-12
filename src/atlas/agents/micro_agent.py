@@ -8,6 +8,7 @@ Two agent types:
 import logging
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from atlas.agents.gemini_client import GeminiClient
@@ -19,6 +20,9 @@ from atlas.rag.web_search import WebSearchClient, WebSearchResults
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from atlas.scout.repo_tools import RepoTools
+
 
 @dataclass
 class AgentContext:
@@ -26,6 +30,7 @@ class AgentContext:
 
     task: TaskSubmission
     repository_content: str  # Relevant code from the repo
+    repo_tools: "RepoTools | None" = None
     rag_context: Context7Result | None = None
     web_search_context: WebSearchResults | None = None
     additional_context: str = ""
@@ -367,6 +372,7 @@ class AgenticMicroAgent:
                 temperature=temperature,
                 max_tokens=self.config.max_output_tokens,
                 max_iterations=10,
+                repo_tools=context.repo_tools,
             )
 
             # Extract the patch from the response

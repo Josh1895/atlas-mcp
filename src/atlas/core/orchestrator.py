@@ -1,18 +1,27 @@
-"""Main orchestrator for ATLAS code generation pipeline."""
+"""Main orchestrator for ATLAS code generation pipeline.
+
+Enhanced with:
+- Test execution loop (apply patch → run tests → record outcomes)
+- Behavioral clustering (cluster by test outcomes, not just similarity)
+- Intelligent context extraction (replaces "first 10 files")
+- Proper patch application for quality scoring
+"""
 
 import asyncio
 import logging
+import shutil
 import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 import git
 
 from atlas.agents.agent_pool import AgentPoolManager, SwarmResult
 from atlas.agents.micro_agent import AgentContext
+from atlas.context.repo_analyzer import RepoAnalyzer, RepoContext, AnalysisConfig, FileRelevance
 from atlas.core.config import Config, get_config
 from atlas.core.task import (
     CostBreakdown,
@@ -27,9 +36,19 @@ from atlas.quality.pipeline import (
     QualitySelectionPipeline,
     QualitySelectionResult,
 )
+from atlas.verification.behavioral_clustering import (
+    BehavioralClusterer,
+    BehavioralClusteringResult,
+    BehavioralSignature,
+    VerificationResult,
+    cluster_by_test_outcomes,
+    select_best_patches,
+)
 from atlas.verification.clustering import calculate_diversity_score
+from atlas.verification.patch_applier import PatchApplier, create_patched_checkout
 from atlas.verification.patch_validator import PatchValidator
 from atlas.verification.static_analysis import StaticAnalyzer
+from atlas.verification.test_runner import TestRunner, TestResult
 from atlas.voting.consensus import IncrementalVoter, VotingResult
 
 logger = logging.getLogger(__name__)
@@ -39,19 +58,26 @@ class ATLASOrchestrator:
     """Main orchestrator for the ATLAS code generation pipeline.
 
     Coordinates:
-    1. Repository cloning
-    2. Context gathering (RAG) - autonomous via agentic agents
+    1. Repository cloning (with proper base_commit support)
+    2. Intelligent context extraction (replaces "first 10 files")
     3. Parallel patch generation with diverse prompt styles
-    4. Validation and clustering
-    5. Consensus voting (first-to-ahead-by-K)
-    6. Quality selection (when multiple patches pass)
-    7. Result compilation
+    4. Patch application and test execution (primary correctness oracle)
+    5. Behavioral clustering (cluster by test outcomes)
+    6. Similarity-based voting (for diversity analysis)
+    7. Quality selection (when multiple patches pass tests)
+    8. Result compilation
+
+    Key improvements:
+    - Tests are the PRIMARY correctness oracle, not patch similarity
+    - Patches are actually applied and tested, not just validated structurally
+    - Quality scoring uses actually patched files, not originals
     """
 
     def __init__(
         self,
         config: Config | None = None,
         enable_quality_selection: bool = True,
+        enable_test_execution: bool = True,
         use_agentic: bool = True,
     ):
         """Initialize the orchestrator.
@@ -59,11 +85,13 @@ class ATLASOrchestrator:
         Args:
             config: Optional Config instance
             enable_quality_selection: Whether to run quality selection on passing patches
+            enable_test_execution: Whether to run tests on patches (HIGHLY RECOMMENDED)
             use_agentic: If True (default), agents autonomously search Context7 and web.
                          If False, use pre-fetched RAG (faster but less thorough).
         """
         self.config = config or get_config()
         self.enable_quality_selection = enable_quality_selection
+        self.enable_test_execution = enable_test_execution
         self.use_agentic = use_agentic
         self.agent_pool = AgentPoolManager(config=self.config, use_agentic=use_agentic)
         self.voter = IncrementalVoter(
@@ -72,6 +100,10 @@ class ATLASOrchestrator:
         )
         self.patch_validator = PatchValidator()
         self.static_analyzer = StaticAnalyzer()
+        self.patch_applier = PatchApplier()
+        self.test_runner = TestRunner(timeout_seconds=300)
+        self.repo_analyzer = RepoAnalyzer()
+        self.behavioral_clusterer = BehavioralClusterer(prioritize_passing=True)
 
         # Quality selection pipeline (initialized lazily with LLM client)
         self._quality_pipeline: Optional[QualitySelectionPipeline] = None
@@ -79,10 +111,25 @@ class ATLASOrchestrator:
         # State tracking
         self._tasks: dict[str, TaskResult] = {}
         self._active_task: str | None = None
+        self._repo_path: Optional[Path] = None  # Current repo path for test execution
+        self._repo_context: Optional[RepoContext] = None  # Intelligent context
         self._repo_files: Dict[str, str] = {}  # Cache for quality selection
+        self._verification_results: Dict[str, VerificationResult] = {}  # Test results per patch
 
     async def solve(self, task: TaskSubmission) -> TaskResult:
-        """Solve a coding task using multi-agent consensus.
+        """Solve a coding task using multi-agent consensus with test verification.
+
+        The key insight: tests are the PRIMARY correctness oracle, not patch similarity.
+        Similarity clustering is demoted to a supporting role for diversity analysis.
+
+        Flow:
+        1. Clone repository (with proper base_commit support)
+        2. Extract intelligent context (not just "first 10 files")
+        3. Generate patches with diverse agents
+        4. Apply patches and run tests (behavioral verification)
+        5. Cluster by test outcomes (behavioral clustering)
+        6. Run quality selection on PASSING patches only
+        7. Return best patch with confidence based on test results
 
         Args:
             task: The task submission
@@ -103,17 +150,28 @@ class ATLASOrchestrator:
         )
         self._tasks[task.task_id] = result
         self._active_task = task.task_id
+        self._verification_results = {}
+
+        temp_dir = None
 
         try:
-            # Phase 1: Clone repository
+            # Phase 1: Clone repository (with proper base_commit support)
             trace.add_phase("cloning")
             result.status = TaskStatus.CLONING
-            repo_content = await self._clone_and_extract(task, trace)
 
-            if not repo_content:
+            temp_dir, repo_path, repo_context = await self._clone_and_analyze(task, trace)
+
+            if not repo_path:
                 result.status = TaskStatus.FAILED
                 result.error_message = "Failed to clone repository"
                 return result
+
+            self._repo_path = repo_path
+            self._repo_context = repo_context
+            self._repo_files = repo_context.files
+
+            # Format repo content for agents
+            repo_content = self._format_context_for_agents(repo_context)
 
             # Phase 2: Generate patches with diverse agents
             trace.add_phase("generating")
@@ -127,15 +185,22 @@ class ATLASOrchestrator:
 
             # Run swarm and vote incrementally
             self.voter.reset()
+            all_solutions: List[Solution] = []
             total_samples = 0
             max_batches = (task.max_samples + task.initial_samples - 1) // task.initial_samples
 
             for batch in range(max_batches):
-                batch_size = task.initial_samples if batch == 0 else task.initial_samples
+                batch_size = task.initial_samples
 
                 # Check cost limit
                 if cost_breakdown.total >= task.max_cost_usd:
                     logger.warning("Cost limit reached")
+                    break
+
+                # Check time limit
+                elapsed = time.time() - start_time
+                if elapsed > task.timeout_minutes * 60:
+                    logger.warning("Time limit reached")
                     break
 
                 # Generate batch of solutions
@@ -146,10 +211,11 @@ class ATLASOrchestrator:
                 cost_breakdown.add_model_cost("gemini", swarm_result.total_cost)
                 result.cost_usd = cost_breakdown.total
 
-                # Validate solutions
+                # Validate solutions (structural validation)
                 trace.add_phase("validating")
                 result.status = TaskStatus.VALIDATING
                 validated_solutions = self._validate_solutions(swarm_result.solutions)
+                all_solutions.extend(validated_solutions)
 
                 # Record agent outputs
                 for solution in validated_solutions:
@@ -161,11 +227,12 @@ class ATLASOrchestrator:
                         cost=solution.cost,
                     )
 
-                # Vote on solutions
+                total_samples += len(validated_solutions)
+
+                # Run similarity-based voting (for diversity tracking, NOT correctness)
                 trace.add_phase("voting")
                 result.status = TaskStatus.VOTING
                 voting_result = self.voter.add_solutions(validated_solutions)
-                total_samples += len(validated_solutions)
 
                 trace.add_voting_round(
                     round_number=batch + 1,
@@ -174,102 +241,131 @@ class ATLASOrchestrator:
                     consensus_reached=voting_result.consensus_reached,
                 )
 
-                # Check for consensus
+                # Early stopping based on similarity consensus (but we'll still verify with tests)
                 if voting_result.consensus_reached:
-                    logger.info(f"Consensus reached after {total_samples} samples")
+                    logger.info(f"Similarity consensus reached after {total_samples} samples")
                     break
 
-            # Finalize result
-            result.samples_generated = total_samples
-            result.votes_cast = total_samples
+            # Phase 3: Test execution and behavioral clustering (THE PRIMARY ORACLE)
+            valid_patches = [s for s in all_solutions if s.is_valid and s.patch]
 
-            # Get all valid solutions for quality selection
-            valid_solutions = [s for s in self.voter._all_solutions if s.is_valid and s.patch]
+            if self.enable_test_execution and valid_patches:
+                trace.add_phase("test_execution")
+                result.status = TaskStatus.VALIDATING
+                logger.info(f"Running tests on {len(valid_patches)} valid patches")
 
-            if self.voter.has_consensus():
-                winner = self.voter.get_winner()
-                if winner:
-                    # If we have multiple valid patches, run quality selection
-                    if self.enable_quality_selection and len(valid_solutions) > 1:
+                # Run tests on all valid patches
+                test_results = await self._run_tests_on_patches(
+                    patches=valid_patches,
+                    repo_path=repo_path,
+                    test_command=task.test_command,
+                )
+
+                # Behavioral clustering (cluster by test outcomes)
+                trace.add_phase("behavioral_clustering")
+                behavioral_result = cluster_by_test_outcomes(test_results)
+
+                trace.add_phase("behavioral_clustering", {
+                    "total_patches": behavioral_result.total_patches,
+                    "passing_patches": behavioral_result.patches_all_pass,
+                    "failing_patches": behavioral_result.patches_some_fail,
+                    "error_patches": behavioral_result.patches_error,
+                    "clusters_found": len(behavioral_result.clusters),
+                })
+
+                # Select best patches from passing clusters
+                if behavioral_result.has_passing_patches:
+                    logger.info(f"{behavioral_result.patches_all_pass} patches pass all tests!")
+
+                    # Get passing solutions
+                    passing_patch_ids = set()
+                    for cluster in behavioral_result.passing_clusters:
+                        passing_patch_ids.update(cluster.patch_ids)
+
+                    passing_solutions = [
+                        s for s in valid_patches if s.agent_id in passing_patch_ids
+                    ]
+
+                    # Run quality selection on passing patches only
+                    if self.enable_quality_selection and len(passing_solutions) > 1:
                         trace.add_phase("quality_selection")
-                        result.status = TaskStatus.VALIDATING
-
                         quality_result = await self._run_quality_selection(
-                            solutions=valid_solutions,
+                            solutions=passing_solutions,
                             task=task,
-                            repo_content=repo_content,
+                            repo_context=repo_context,
                         )
 
                         if quality_result and quality_result.selection.best_patch_content:
                             result.patch = quality_result.selection.best_patch_content
-                            # Boost confidence if quality selection agrees with voting
-                            if quality_result.selection.best_patch_id == winner.agent_id:
-                                result.confidence_score = min(1.0, voting_result.confidence_score * 1.1)
-                            else:
-                                result.confidence_score = voting_result.confidence_score
+                            result.confidence_score = behavioral_result.confidence
                             logger.info(f"Quality selection chose: {quality_result.selection.best_patch_id}")
-                            logger.info(f"Reason: {quality_result.selection.selection_reason}")
                         else:
-                            result.patch = winner.patch
-                            result.confidence_score = voting_result.confidence_score
+                            # Use representative from largest passing cluster
+                            best_cluster = behavioral_result.passing_clusters[0]
+                            best_patch_id = best_cluster.representative_patch_id
+                            best_solution = next(
+                                (s for s in passing_solutions if s.agent_id == best_patch_id),
+                                passing_solutions[0]
+                            )
+                            result.patch = best_solution.patch
+                            result.confidence_score = behavioral_result.confidence
                     else:
-                        result.patch = winner.patch
-                        result.confidence_score = voting_result.confidence_score
+                        # Single passing patch or quality selection disabled
+                        result.patch = passing_solutions[0].patch
+                        result.confidence_score = behavioral_result.confidence
 
                     result.consensus_reached = True
                     result.status = TaskStatus.COMPLETED
-                    result.models_used = list(set(
-                        s.model for s in self.voter._all_solutions if s.model
-                    ))
-            else:
-                # No consensus - run quality selection on valid patches
-                if self.enable_quality_selection and len(valid_solutions) > 1:
-                    trace.add_phase("quality_selection")
-                    result.status = TaskStatus.VALIDATING
-
-                    quality_result = await self._run_quality_selection(
-                        solutions=valid_solutions,
-                        task=task,
-                        repo_content=repo_content,
-                    )
-
-                    if quality_result and quality_result.selection.best_patch_content:
-                        result.patch = quality_result.selection.best_patch_content
-                        result.confidence_score = voting_result.confidence_score * 0.7
-                        result.consensus_reached = False
-                        result.status = TaskStatus.COMPLETED
-                        result.models_used = list(set(
-                            s.model for s in self.voter._all_solutions if s.model
-                        ))
-                        logger.info(f"Quality selection chose (no consensus): {quality_result.selection.best_patch_id}")
-                    else:
-                        # Fallback to best effort
-                        best_effort = self.voter.get_best_effort()
-                        if best_effort:
-                            result.patch = best_effort.patch
-                            result.confidence_score = voting_result.confidence_score * 0.5
-                            result.consensus_reached = False
-                            result.status = TaskStatus.COMPLETED
-                            result.models_used = list(set(
-                                s.model for s in self.voter._all_solutions if s.model
-                            ))
-                        else:
-                            result.status = TaskStatus.FAILED
-                            result.error_message = "No valid patches generated"
                 else:
-                    # Quality selection disabled or only one valid solution
-                    best_effort = self.voter.get_best_effort()
-                    if best_effort:
-                        result.patch = best_effort.patch
-                        result.confidence_score = voting_result.confidence_score * 0.5
+                    # No patches pass all tests
+                    logger.warning("No patches pass all tests")
+                    trace.warnings.append("No patches passed all tests")
+
+                    # Fall back to similarity-based selection with reduced confidence
+                    if voting_result.winner:
+                        result.patch = voting_result.winner.patch
+                        result.confidence_score = voting_result.confidence_score * 0.3
                         result.consensus_reached = False
                         result.status = TaskStatus.COMPLETED
-                        result.models_used = list(set(
-                            s.model for s in self.voter._all_solutions if s.model
-                        ))
+                        trace.warnings.append("Falling back to similarity consensus (no test-passing patches)")
                     else:
                         result.status = TaskStatus.FAILED
-                        result.error_message = "No valid patches generated"
+                        result.error_message = "No patches pass tests and no similarity consensus"
+            else:
+                # Test execution disabled - fall back to original behavior
+                logger.info("Test execution disabled, using similarity-based selection")
+
+                if voting_result.winner:
+                    # Run quality selection if enabled
+                    if self.enable_quality_selection and len(valid_patches) > 1:
+                        trace.add_phase("quality_selection")
+                        quality_result = await self._run_quality_selection(
+                            solutions=valid_patches,
+                            task=task,
+                            repo_context=repo_context,
+                        )
+
+                        if quality_result and quality_result.selection.best_patch_content:
+                            result.patch = quality_result.selection.best_patch_content
+                            result.confidence_score = voting_result.confidence_score * 0.8
+                        else:
+                            result.patch = voting_result.winner.patch
+                            result.confidence_score = voting_result.confidence_score * 0.8
+                    else:
+                        result.patch = voting_result.winner.patch
+                        result.confidence_score = voting_result.confidence_score * 0.8
+
+                    result.consensus_reached = voting_result.consensus_reached
+                    result.status = TaskStatus.COMPLETED
+                    trace.warnings.append("Test execution disabled - confidence reduced")
+                else:
+                    result.status = TaskStatus.FAILED
+                    result.error_message = "No valid patches generated"
+
+            # Finalize result
+            result.samples_generated = total_samples
+            result.votes_cast = total_samples
+            result.models_used = list(set(s.model for s in all_solutions if s.model))
 
         except asyncio.TimeoutError:
             result.status = TaskStatus.TIMEOUT
@@ -282,126 +378,262 @@ class ATLASOrchestrator:
             trace.errors.append(str(e))
 
         finally:
-            # Record completion
+            # Cleanup
             result.duration_seconds = time.time() - start_time
             trace.completed_at = datetime.now()
             self._active_task = None
+            self._repo_path = None
+            self._repo_context = None
+
+            # Clean up temp directory
+            if temp_dir and Path(temp_dir).exists():
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temp dir: {e}")
 
         return result
 
-    async def _clone_and_extract(
+    async def _clone_and_analyze(
         self,
         task: TaskSubmission,
         trace: ExecutionTrace,
-    ) -> str:
-        """Clone the repository and extract relevant code.
+    ) -> Tuple[Optional[str], Optional[Path], Optional[RepoContext]]:
+        """Clone the repository and extract intelligent context.
+
+        This replaces the old "first 10 files" approach with:
+        - Proper base_commit support (full clone if needed)
+        - Intelligent file selection based on issue keywords
+        - Symbol and import analysis
 
         Args:
             task: The task submission
             trace: Execution trace for logging
 
         Returns:
-            Extracted code content as a string
+            Tuple of (temp_dir, repo_path, RepoContext) or (None, None, None) on failure
         """
         try:
-            # Create temporary directory for clone
-            with tempfile.TemporaryDirectory() as temp_dir:
-                repo_path = Path(temp_dir) / "repo"
+            # Create temporary directory for clone (caller must clean up)
+            temp_dir = tempfile.mkdtemp(prefix="atlas_repo_")
+            repo_path = Path(temp_dir) / "repo"
 
-                # Clone the repository
-                logger.info(f"Cloning {task.repository_url}")
+            # Clone the repository
+            logger.info(f"Cloning {task.repository_url}")
 
-                # Run git clone in executor
-                loop = asyncio.get_event_loop()
+            # Determine clone depth
+            # If base_commit is specified, we need a full clone (or fetch that commit)
+            use_shallow = task.base_commit is None
+            clone_depth = 1 if use_shallow else None
+
+            # Run git clone in executor
+            loop = asyncio.get_event_loop()
+
+            if clone_depth:
                 await loop.run_in_executor(
                     None,
                     lambda: git.Repo.clone_from(
                         task.repository_url,
                         repo_path,
                         branch=task.branch,
-                        depth=1,  # Shallow clone for speed
+                        depth=clone_depth,
+                    ),
+                )
+            else:
+                # Full clone for base_commit support
+                await loop.run_in_executor(
+                    None,
+                    lambda: git.Repo.clone_from(
+                        task.repository_url,
+                        repo_path,
+                        branch=task.branch,
                     ),
                 )
 
-                # If a specific commit is requested, check it out
-                if task.base_commit:
-                    repo = git.Repo(repo_path)
+            # If a specific commit is requested, check it out
+            if task.base_commit:
+                repo = git.Repo(repo_path)
+                try:
                     repo.git.checkout(task.base_commit)
+                    logger.info(f"Checked out commit {task.base_commit}")
+                except git.GitCommandError as e:
+                    logger.warning(f"Failed to checkout {task.base_commit}: {e}")
+                    trace.warnings.append(f"Could not checkout {task.base_commit}, using HEAD")
 
-                # Extract relevant files
-                content = await self._extract_relevant_code(
-                    repo_path,
-                    task.relevant_files,
-                )
+            # Use intelligent context extraction
+            logger.info("Analyzing repository for relevant context")
+            analysis_config = AnalysisConfig(
+                max_files=15,
+                max_file_size=50000,
+                max_total_size=200000,
+                include_tests=True,
+                test_file_limit=3,
+            )
+            analyzer = RepoAnalyzer(analysis_config)
 
-                trace.add_phase("cloning", {"files_extracted": len(content.split("\n"))})
-                return content
+            repo_context = analyzer.analyze(
+                repo_path=repo_path,
+                issue_description=task.description,
+                relevant_files=task.relevant_files,
+            )
+
+            trace.add_phase("cloning", {
+                "files_scanned": repo_context.total_files_scanned,
+                "files_selected": repo_context.files_selected,
+                "primary_language": repo_context.primary_language,
+            })
+
+            logger.info(
+                f"Selected {repo_context.files_selected} files from "
+                f"{repo_context.total_files_scanned} scanned "
+                f"(language: {repo_context.primary_language})"
+            )
+
+            return temp_dir, repo_path, repo_context
 
         except git.GitCommandError as e:
             logger.error(f"Git clone failed: {e}")
             trace.errors.append(f"Git clone failed: {e}")
-            return ""
+            return None, None, None
 
         except Exception as e:
             logger.error(f"Repository extraction failed: {e}")
             trace.errors.append(f"Repository extraction failed: {e}")
-            return ""
+            return None, None, None
 
-    async def _extract_relevant_code(
-        self,
-        repo_path: Path,
-        relevant_files: list[str] | None,
-    ) -> str:
-        """Extract relevant code from the repository.
+    def _format_context_for_agents(self, repo_context: RepoContext) -> str:
+        """Format repository context for agents.
 
         Args:
-            repo_path: Path to the cloned repository
-            relevant_files: Optional list of files to focus on
+            repo_context: The analyzed repository context
 
         Returns:
-            Combined code content
+            Formatted string with file contents and relevance info
         """
-        content_parts = []
+        parts = []
+        parts.append(f"# Repository Context (Language: {repo_context.primary_language})")
+        parts.append(f"# Files: {repo_context.files_selected} selected from {repo_context.total_files_scanned} scanned")
+        parts.append("")
 
-        if relevant_files:
-            # Extract specified files
-            for file_path in relevant_files:
-                full_path = repo_path / file_path
-                if full_path.exists() and full_path.is_file():
-                    try:
-                        content = full_path.read_text()
-                        content_parts.append(f"# File: {file_path}\n{content}")
-                    except Exception as e:
-                        logger.warning(f"Failed to read {file_path}: {e}")
-        else:
-            # Extract Python files (limited for context window)
-            python_files = list(repo_path.rglob("*.py"))[:10]  # Limit to 10 files
+        # Sort files by relevance score
+        sorted_files = sorted(
+            repo_context.files.items(),
+            key=lambda x: repo_context.file_relevance.get(x[0], FileRelevance(path=x[0])).score,
+            reverse=True,
+        )
 
-            for file_path in python_files:
+        for path, content in sorted_files:
+            relevance = repo_context.file_relevance.get(path)
+            if relevance:
+                reasons = ", ".join(relevance.reasons[:3]) if relevance.reasons else "auto-selected"
+                parts.append(f"# File: {path} (Relevance: {relevance.score:.1f}, {reasons})")
+            else:
+                parts.append(f"# File: {path}")
+            parts.append(content)
+            parts.append("")
+
+        return "\n".join(parts)
+
+    async def _run_tests_on_patches(
+        self,
+        patches: List[Solution],
+        repo_path: Path,
+        test_command: Optional[str] = None,
+    ) -> Dict[str, TestResult]:
+        """Apply patches and run tests on each.
+
+        This is the PRIMARY correctness oracle. Patches that don't pass tests
+        should not be selected regardless of similarity consensus.
+
+        Args:
+            patches: List of patches to test
+            repo_path: Path to the original repository
+            test_command: Optional explicit test command
+
+        Returns:
+            Dict of {patch_id: TestResult}
+        """
+        results = {}
+
+        # Run tests in parallel (with concurrency limit)
+        semaphore = asyncio.Semaphore(3)  # Limit concurrent test runs
+
+        async def test_patch(solution: Solution) -> Tuple[str, TestResult]:
+            async with semaphore:
+                patch_id = solution.agent_id
+                patch_content = solution.patch
+
+                logger.info(f"Testing patch {patch_id}")
+
                 try:
-                    rel_path = file_path.relative_to(repo_path)
-                    content = file_path.read_text()
-                    # Limit file size
-                    if len(content) > 10000:
-                        content = content[:10000] + "\n# ... (truncated)"
-                    content_parts.append(f"# File: {rel_path}\n{content}")
-                except Exception as e:
-                    logger.warning(f"Failed to read {file_path}: {e}")
+                    # Create patched checkout
+                    patched_path, apply_result = create_patched_checkout(
+                        repo_path, patch_content
+                    )
 
-        return "\n\n".join(content_parts)
+                    if not patched_path:
+                        return patch_id, TestResult(
+                            success=False,
+                            execution_error=f"Failed to apply patch: {'; '.join(apply_result.errors)}",
+                        )
+
+                    try:
+                        # Run tests
+                        test_result = await self.test_runner.run_tests(
+                            patched_path,
+                            test_command=test_command,
+                        )
+
+                        logger.info(
+                            f"Patch {patch_id}: {'PASS' if test_result.success else 'FAIL'} "
+                            f"({test_result.passed}/{test_result.total} tests passed)"
+                        )
+
+                        # Store verification result
+                        self._verification_results[patch_id] = VerificationResult(
+                            patch_id=patch_id,
+                            apply_success=True,
+                            test_result=test_result,
+                        )
+
+                        return patch_id, test_result
+
+                    finally:
+                        # Clean up patched checkout
+                        if patched_path and patched_path.exists():
+                            shutil.rmtree(patched_path)
+
+                except Exception as e:
+                    logger.error(f"Error testing patch {patch_id}: {e}")
+                    return patch_id, TestResult(
+                        success=False,
+                        execution_error=str(e),
+                    )
+
+        # Run all tests
+        tasks = [test_patch(solution) for solution in patches]
+        test_results = await asyncio.gather(*tasks)
+
+        for patch_id, result in test_results:
+            results[patch_id] = result
+
+        return results
 
     async def _run_quality_selection(
         self,
-        solutions: list[Solution],
+        solutions: List[Solution],
         task: TaskSubmission,
-        repo_content: str,
+        repo_context: RepoContext,
     ) -> Optional[QualitySelectionResult]:
         """Run quality selection on valid solutions.
+
+        IMPORTANT: This now properly applies patches before scoring,
+        fixing the bug where original files were used for quality scoring.
 
         Args:
             solutions: List of valid solutions to choose from
             task: The task submission
-            repo_content: Repository content for context
+            repo_context: Repository context with original files
 
         Returns:
             QualitySelectionResult or None if selection fails
@@ -428,15 +660,38 @@ class ATLASOrchestrator:
                     llm_client=llm_client,
                 )
 
-            # Build original files dict from repo content
-            original_files = self._parse_repo_content(repo_content)
+            # Get original files from repo context
+            original_files = repo_context.files
 
-            # Build patched files map (simplified - in production would apply patches)
+            # Build ACTUALLY patched files map (FIX: no longer uses original files!)
             patched_files_map = {}
-            for patch_id in patches.keys():
-                # For now, just use original files as base
-                # In production, would properly apply each patch
-                patched_files_map[patch_id] = dict(original_files)
+            for patch_id, patch_content in patches.items():
+                try:
+                    # Apply the patch to get actual patched files
+                    apply_result = self.patch_applier.apply_patch(
+                        patch_content,
+                        original_files,
+                    )
+
+                    if apply_result.success:
+                        patched_files_map[patch_id] = apply_result.patched_files
+                    else:
+                        # If patch fails to apply, use original with warning
+                        logger.warning(
+                            f"Patch {patch_id} failed to apply for quality scoring: "
+                            f"{'; '.join(apply_result.errors)}"
+                        )
+                        patched_files_map[patch_id] = dict(original_files)
+
+                except Exception as e:
+                    logger.warning(f"Error applying patch {patch_id}: {e}")
+                    patched_files_map[patch_id] = dict(original_files)
+
+            # Format context for quality selection
+            context_parts = []
+            for path, content in list(repo_context.files.items())[:5]:
+                context_parts.append(f"# {path}\n{content[:2000]}")
+            context_code = "\n\n".join(context_parts)
 
             # Run quality selection
             result = await self._quality_pipeline.select_best_patch(
@@ -444,7 +699,7 @@ class ATLASOrchestrator:
                 issue_description=task.description,
                 original_files=original_files,
                 patched_files_map=patched_files_map,
-                context_code=repo_content[:5000],  # Limit context size
+                context_code=context_code,
             )
 
             return result
@@ -452,37 +707,6 @@ class ATLASOrchestrator:
         except Exception as e:
             logger.error(f"Quality selection failed: {e}")
             return None
-
-    def _parse_repo_content(self, repo_content: str) -> Dict[str, str]:
-        """Parse repository content string into file dict.
-
-        Args:
-            repo_content: Combined repository content with file markers
-
-        Returns:
-            Dict of {filepath: content}
-        """
-        files = {}
-        current_file = None
-        current_content = []
-
-        for line in repo_content.split("\n"):
-            if line.startswith("# File: "):
-                # Save previous file
-                if current_file:
-                    files[current_file] = "\n".join(current_content)
-
-                # Start new file
-                current_file = line[8:].strip()
-                current_content = []
-            else:
-                current_content.append(line)
-
-        # Save last file
-        if current_file:
-            files[current_file] = "\n".join(current_content)
-
-        return files
 
     def _validate_solutions(self, solutions: list[Solution]) -> list[Solution]:
         """Validate solutions using static analysis.

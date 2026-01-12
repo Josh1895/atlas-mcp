@@ -16,6 +16,7 @@ from google.genai import types
 from atlas.core.config import Config, get_config
 from atlas.rag.context7 import Context7Client
 from atlas.rag.web_search import WebSearchClient
+from atlas.scout.repo_tools import RepoTools
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,103 @@ AGENT_TOOLS = [
                     required=["query"],
                 ),
             ),
+            # Repo tools for local codebase research
+            types.FunctionDeclaration(
+                name="repo_search",
+                description=(
+                    "Search the local repository for a query. "
+                    "Use this to find symbols, component names, and patterns in the codebase."
+                ),
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "query": types.Schema(
+                            type=types.Type.STRING,
+                            description="Search query (e.g., 'DataGrid', 'ColumnManager', 'TaskDAG')",
+                        ),
+                        "glob": types.Schema(
+                            type=types.Type.STRING,
+                            description="Optional glob filter (e.g., 'src/**/*.py')",
+                        ),
+                        "max_hits": types.Schema(
+                            type=types.Type.INTEGER,
+                            description="Maximum number of results (default 10)",
+                        ),
+                    },
+                    required=["query"],
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="repo_open_file",
+                description="Open a file from the local repository with optional line range.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "path": types.Schema(
+                            type=types.Type.STRING,
+                            description="Repository-relative file path",
+                        ),
+                        "start_line": types.Schema(
+                            type=types.Type.INTEGER,
+                            description="Start line (1-based)",
+                        ),
+                        "end_line": types.Schema(
+                            type=types.Type.INTEGER,
+                            description="End line (1-based)",
+                        ),
+                    },
+                    required=["path"],
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="repo_find_symbol",
+                description="Find symbol definitions in the local repository.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "symbol": types.Schema(
+                            type=types.Type.STRING,
+                            description="Symbol name to search for",
+                        ),
+                    },
+                    required=["symbol"],
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="repo_list_tests",
+                description="List test files in the local repository.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "related_path": types.Schema(
+                            type=types.Type.STRING,
+                            description="Optional substring to filter test files",
+                        ),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="repo_get_style_guide",
+                description="Get style guide and lint configuration snippets from the local repo.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={},
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="repo_get_component_map",
+                description="Get file paths where a component or symbol is defined.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "component_name": types.Schema(
+                            type=types.Type.STRING,
+                            description="Component or symbol name",
+                        ),
+                    },
+                    required=["component_name"],
+                ),
+            ),
         ]
     )
 ]
@@ -145,7 +243,12 @@ class AgenticGeminiClient:
             self._client = genai.Client(api_key=self.config.gemini_api_key)
         return self._client
 
-    async def _execute_tool(self, name: str, args: dict[str, Any]) -> str:
+    async def _execute_tool(
+        self,
+        name: str,
+        args: dict[str, Any],
+        repo_tools: RepoTools | None = None,
+    ) -> str:
         """Execute a tool call and return the result."""
         logger.info(f"Executing tool: {name} with args: {args}")
 
@@ -193,6 +296,61 @@ class AgenticGeminiClient:
 
             return "\n".join(output_parts)
 
+        elif name.startswith("repo_"):
+            if not repo_tools:
+                return "Repo tools unavailable. Provide repo context before searching."
+
+            if name == "repo_search":
+                query = args.get("query", "")
+                glob = args.get("glob")
+                max_hits = min(args.get("max_hits", 10), 20)
+                hits = await repo_tools.search(query, glob=glob, max_hits=max_hits)
+                if not hits:
+                    return f"No matches for '{query}'."
+                output = [f"Repo search results for '{query}':"]
+                for hit in hits:
+                    output.append(f"- {hit.path}:{hit.line} {hit.preview}")
+                return "\n".join(output)
+
+            if name == "repo_open_file":
+                path = args.get("path", "")
+                start_line = int(args.get("start_line", 1) or 1)
+                end_line = args.get("end_line")
+                end = int(end_line) if end_line is not None else None
+                content = await repo_tools.open_file(path, start_line=start_line, end_line=end)
+                return f"# {path}\n{content}"
+
+            if name == "repo_find_symbol":
+                symbol = args.get("symbol", "")
+                locations = await repo_tools.find_symbol(symbol)
+                if not locations:
+                    return f"No symbol '{symbol}' found."
+                output = [f"Symbol locations for '{symbol}':"]
+                for loc in locations:
+                    output.append(f"- {loc.path}:{loc.line} ({loc.kind})")
+                return "\n".join(output)
+
+            if name == "repo_list_tests":
+                related_path = args.get("related_path")
+                tests = repo_tools.list_tests(related_path=related_path)
+                if not tests:
+                    return "No tests found."
+                return "Test files:\n" + "\n".join(f"- {t}" for t in tests[:50])
+
+            if name == "repo_get_style_guide":
+                return repo_tools.get_style_guide()
+
+            if name == "repo_get_component_map":
+                component_name = args.get("component_name", "")
+                component_map = repo_tools.get_component_map(component_name)
+                if not component_map:
+                    return f"No component '{component_name}' found."
+                return "\n".join(
+                    f"{name}: {', '.join(paths)}" for name, paths in component_map.items()
+                )
+
+            return f"Unknown repo tool: {name}"
+
         return f"Unknown tool: {name}"
 
     async def generate_with_tools(
@@ -202,6 +360,7 @@ class AgenticGeminiClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         max_iterations: int = 10,
+        repo_tools: RepoTools | None = None,
     ) -> AgentResult:
         """Generate with autonomous tool access.
 
@@ -230,13 +389,20 @@ class AgenticGeminiClient:
             "1. resolve_library_id - Find library IDs for Context7 documentation\n"
             "2. get_library_docs - Fetch official documentation from Context7\n"
             "3. web_search - Search the web for best practices, Stack Overflow, tutorials, examples\n"
+            "4. repo_search - Search the local repository\n"
+            "5. repo_open_file - Open local files with line ranges\n"
+            "6. repo_find_symbol - Find symbol definitions in the repo\n"
+            "7. repo_list_tests - List relevant tests\n"
+            "8. repo_get_style_guide - Fetch style/lint configs\n"
+            "9. repo_get_component_map - Locate component definitions\n"
             "\n"
             "Research strategy:\n"
             "1. Use resolve_library_id + get_library_docs for official API documentation\n"
             "2. Use web_search for best practices, common patterns, and real-world examples\n"
-            "3. ALWAYS search both Context7 AND the web - they complement each other\n"
-            "4. Make multiple tool calls to gather comprehensive information\n"
-            "5. After researching, provide a complete, production-ready answer\n"
+            "3. Use repo_search + repo_open_file to ground changes in the codebase\n"
+            "4. ALWAYS search both Context7 AND the web - they complement each other\n"
+            "5. Make multiple tool calls to gather comprehensive information\n"
+            "6. After researching, provide a complete, production-ready answer\n"
             "\n\n"
         )
         if system_prompt:
@@ -310,7 +476,7 @@ class AgenticGeminiClient:
                             args[key] = value
 
                     # Execute the tool
-                    tool_result = await self._execute_tool(fc.name, args)
+                    tool_result = await self._execute_tool(fc.name, args, repo_tools=repo_tools)
 
                     tool_calls.append({
                         "name": fc.name,
