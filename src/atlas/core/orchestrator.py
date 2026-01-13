@@ -580,6 +580,8 @@ class ATLASOrchestrator:
         )
 
         for path, content in sorted_files:
+            # Normalize path to forward slashes for consistency with patches
+            norm_path = path.replace("\\", "/")
             relevance = repo_context.file_relevance.get(path)
             if relevance:
                 reasons = (
@@ -587,9 +589,9 @@ class ATLASOrchestrator:
                     if relevance.reasons
                     else "auto-selected"
                 )
-                parts.append(f"# File: {path} (Relevance: {relevance.score:.1f}, {reasons})")
+                parts.append(f"# File: {norm_path} (Relevance: {relevance.score:.1f}, {reasons})")
             else:
-                parts.append(f"# File: {path}")
+                parts.append(f"# File: {norm_path}")
             parts.append(content)
             parts.append("")
 
@@ -845,6 +847,7 @@ class ATLASOrchestrator:
             if not solution.patch:
                 solution.is_valid = False
                 solution.validation_errors.append("Empty patch")
+                logger.warning(f"Agent {solution.agent_id}: Empty patch")
                 validated.append(solution)
                 continue
 
@@ -877,6 +880,12 @@ class ATLASOrchestrator:
                     solution.is_valid = False
                     solution.validation_errors.extend(apply_result.errors)
                 solution.validation_errors.extend(apply_result.warnings)
+
+            # Log validation result
+            if solution.is_valid:
+                logger.info(f"Agent {solution.agent_id}: VALID")
+            else:
+                logger.warning(f"Agent {solution.agent_id}: INVALID - {solution.validation_errors[:3]}")
 
             validated.append(solution)
 

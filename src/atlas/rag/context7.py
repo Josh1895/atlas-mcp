@@ -94,10 +94,27 @@ class Context7Client:
         if self.config.context7_api_key:
             headers["Authorization"] = f"Bearer {self.config.context7_api_key}"
 
+        # Retry with exponential backoff for rate limiting (429)
+        max_retries = 3
+        base_delay = 2.0
+
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(url, params=params, headers=headers, timeout=60.0)
-                response.raise_for_status()
+                for attempt in range(max_retries):
+                    response = await client.get(url, params=params, headers=headers, timeout=60.0)
+
+                    if response.status_code == 429:
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (2 ** attempt)  # 2s, 4s, 8s
+                            logger.warning(f"Context7 rate limited (429), retrying in {delay}s...")
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            logger.error("Context7 rate limited after all retries")
+                            return None
+
+                    response.raise_for_status()
+                    break
 
                 # Check content type to determine how to parse
                 content_type = response.headers.get('content-type', '')

@@ -55,6 +55,9 @@ class OwnershipValidator:
                 return True
 
         for pattern in ownership.allowed_globs:
+            # Handle **/* specially - it means "all files"
+            if pattern == "**/*" or pattern == "*":
+                return True
             if fnmatch(path, pattern):
                 return True
 

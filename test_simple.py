@@ -162,11 +162,12 @@ Output ONLY a unified diff patch:
     task_sub = TaskSubmission(
         description=SIMPLE_PROBLEM,
         repository_url=str(temp_dir),
+        relevant_files=["server.js"],
     )
 
     context = AgentContext(
         task=task_sub,
-        repository_content=TEST_FILES['server.js'],
+        repository_content=f"=== server.js ===\n{TEST_FILES['server.js']}",
     )
 
     try:

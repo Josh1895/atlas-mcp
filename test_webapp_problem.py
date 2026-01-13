@@ -459,19 +459,19 @@ async def run_test():
 
     set_config(config)
 
-    # Create orchestrator with verbose settings
+    # Create orchestrator with FULL features enabled
     exec_config = TaskExecutionConfig(
-        agents_per_task=3,  # 3 agents per task for faster testing
+        agents_per_task=4,  # 4 agents per task
         top_k_per_task=2,
-        beam_width=2,
-        enable_quality_selection=False,  # Skip for speed
-        run_oracles=False,  # Skip actual test running for this demo
+        beam_width=3,
+        enable_quality_selection=True,  # Enable quality scoring
+        run_oracles=False,  # Skip test running (no npm installed)
     )
 
     orchestrator = TaskDAGOrchestrator(
         config=config,
         execution_config=exec_config,
-        use_agentic=False,  # Use non-agentic mode for speed (pre-fetched RAG)
+        use_agentic=True,  # Enable autonomous tool access (Context7 + Web Search)
     )
 
     # Create submission

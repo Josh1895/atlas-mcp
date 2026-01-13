@@ -250,10 +250,9 @@ class PatchValidator:
                     result.can_apply = True
                     return result
 
-                result.can_apply = False
+                # Git apply failed - add as warning and try in-memory applier
                 error = check.stderr.strip() or "git apply --check failed"
-                result.add_error(error)
-                return result
+                result.add_warning(f"git apply --check: {error}")
             except Exception as e:
                 result.add_warning(f"git apply --check failed: {e}")
 

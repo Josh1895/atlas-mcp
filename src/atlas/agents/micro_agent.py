@@ -234,9 +234,39 @@ class MicroAgent:
             parts.append(", ".join(context.task.relevant_files))
             parts.append("")
 
-        # Final instruction
-        parts.append("## Instructions")
-        parts.append("Generate a patch to fix this issue. Output the patch in unified diff format.")
+        # Extract file names from repository content
+        file_names = []
+        if context.repository_content:
+            import re
+            file_names = re.findall(r"# File: (\S+)", context.repository_content)
+
+        # Final instruction with explicit format requirements
+        parts.append("## Output Requirements")
+        parts.append("**IMPORTANT**: Generate a COMPLETE unified diff patch that fixes ALL the issues listed above.")
+        parts.append("")
+        parts.append("The patch format MUST be:")
+        parts.append("1. Start with `--- a/filename` and `+++ b/filename` headers")
+        parts.append("2. Include `@@ -start,count +start,count @@` hunk headers for EACH change")
+        parts.append("3. Use `-` for removed lines, `+` for added lines, ` ` (space) for context")
+        parts.append("")
+        if file_names:
+            parts.append(f"**File path**: Use exactly `{file_names[0]}` in the patch headers.")
+            parts.append("")
+            parts.append("Example format:")
+            parts.append("```diff")
+            parts.append(f"--- a/{file_names[0]}")
+            parts.append(f"+++ b/{file_names[0]}")
+            parts.append("@@ -8,6 +8,10 @@")
+            parts.append(" // context before")
+            parts.append("+  // new validation code")
+            parts.append(" // context after")
+            parts.append("@@ -20,6 +24,10 @@")
+            parts.append(" // second location context")
+            parts.append("+  // more new validation code")
+            parts.append(" // more context")
+            parts.append("```")
+        parts.append("")
+        parts.append("Include ALL necessary hunks to fix ALL issues. Do not stop early.")
 
         return "\n".join(parts)
 
@@ -249,40 +279,65 @@ class MicroAgent:
         Returns:
             The extracted patch, or empty string if not found
         """
-        # Look for diff in code blocks
-        diff_pattern = r"```(?:diff)?\s*\n((?:---|\+\+\+|@@|[-+ ].*?\n)+)```"
-        matches = re.findall(diff_pattern, response, re.MULTILINE | re.DOTALL)
+        # Method 1: Look for diff in code blocks (improved pattern)
+        # Match code blocks with optional diff language specifier
+        code_block_pattern = r"```(?:diff|patch)?\s*\n([\s\S]*?)```"
+        code_blocks = re.findall(code_block_pattern, response)
 
-        if matches:
-            # Return the first valid-looking diff
-            for match in matches:
-                if "---" in match or "+++" in match or "@@" in match:
-                    return match.strip()
+        for block in code_blocks:
+            # Check if this block looks like a diff
+            if ("--- " in block or "---\t" in block) and ("@@ " in block or "@@-" in block):
+                return block.strip()
 
-        # Try to find diff without code blocks
+        # Method 2: Extract diff lines directly from response
         lines = response.split("\n")
         diff_lines = []
         in_diff = False
+        found_header = False
 
-        for line in lines:
-            if line.startswith("---") or line.startswith("+++"):
+        for i, line in enumerate(lines):
+            # Start of diff: --- line
+            if line.startswith("--- ") or line.startswith("---\t"):
                 in_diff = True
-                diff_lines.append(line)
+                found_header = True
+                diff_lines = [line]  # Start fresh
             elif in_diff:
-                if line.startswith("@@") or line.startswith("+") or line.startswith("-") or line.startswith(" "):
+                # +++ line must follow ---
+                if line.startswith("+++ ") or line.startswith("+++\t"):
                     diff_lines.append(line)
-                elif line.strip() == "" and diff_lines:
-                    # Allow empty lines within diff
+                # @@ hunk header
+                elif line.startswith("@@ "):
+                    diff_lines.append(line)
+                # Diff content lines
+                elif line.startswith("+") or line.startswith("-") or line.startswith(" "):
+                    diff_lines.append(line)
+                # Empty lines in context
+                elif line == "":
+                    # Check if next line continues the diff
+                    if i + 1 < len(lines):
+                        next_line = lines[i + 1]
+                        if (next_line.startswith("+") or next_line.startswith("-") or
+                            next_line.startswith(" ") or next_line.startswith("@@ ") or
+                            next_line.startswith("--- ")):
+                            diff_lines.append(line)
+                            continue
+                    # End of diff - check if we have enough
+                    if len(diff_lines) > 5:
+                        break
+                elif line.startswith("\\ No newline"):
+                    # Git diff marker, include it
                     diff_lines.append(line)
                 else:
-                    # End of diff section
-                    if len(diff_lines) > 3:  # Minimum viable diff
+                    # Non-diff line encountered
+                    # If we have a valid diff, stop here
+                    if len(diff_lines) > 5 and found_header:
                         break
-                    # Reset and try again
-                    diff_lines = []
-                    in_diff = False
+                    # Otherwise reset and try again
+                    if not found_header:
+                        diff_lines = []
+                        in_diff = False
 
-        if diff_lines:
+        if diff_lines and len(diff_lines) > 5:
             return "\n".join(diff_lines).strip()
 
         return ""

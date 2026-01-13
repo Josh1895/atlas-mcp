@@ -67,10 +67,11 @@ class FilePatch:
         path = self.new_path if not self.is_deleted_file else self.old_path
         # Strip common prefixes
         if path.startswith("b/"):
-            return path[2:]
-        if path.startswith("a/"):
-            return path[2:]
-        return path
+            path = path[2:]
+        elif path.startswith("a/"):
+            path = path[2:]
+        # Normalize to forward slashes (patches always use /)
+        return path.replace("\\", "/")
 
 
 @dataclass
@@ -311,8 +312,12 @@ class PatchApplier:
         if not expected_lines:
             return expected_pos if expected_pos < len(lines) else None
 
-        # Check at expected position
+        # Check at expected position - try exact first
         if self._matches_at_position(lines, expected_lines, expected_pos):
+            return expected_pos
+
+        # Try lenient matching (allow partial context)
+        if self._matches_at_position_lenient(lines, expected_lines, expected_pos):
             return expected_pos
 
         return None
@@ -343,12 +348,20 @@ class PatchApplier:
         if not expected_lines:
             return None
 
-        # Search around expected position
+        # Search around expected position - try exact first
         for offset in range(search_range):
             for pos in [expected_pos + offset, expected_pos - offset]:
                 if pos < 0:
                     continue
                 if self._matches_at_position(lines, expected_lines, pos):
+                    return pos
+
+        # If no exact match, try lenient matching
+        for offset in range(search_range):
+            for pos in [expected_pos + offset, expected_pos - offset]:
+                if pos < 0:
+                    continue
+                if self._matches_at_position_lenient(lines, expected_lines, pos, 0.3):
                     return pos
 
         return None
@@ -377,6 +390,56 @@ class PatchApplier:
                 return False
 
         return True
+
+    def _matches_at_position_lenient(
+        self,
+        lines: List[str],
+        expected: List[str],
+        pos: int,
+        min_match_ratio: float = 0.5,
+    ) -> bool:
+        """Check if expected lines partially match at position.
+
+        More lenient than exact matching - allows partial matches when
+        LLMs provide incomplete context lines.
+
+        Args:
+            lines: File lines
+            expected: Expected lines
+            pos: Position to check
+            min_match_ratio: Minimum ratio of lines that must match
+
+        Returns:
+            True if enough lines match
+        """
+        if pos < 0:
+            return False
+
+        if not expected:
+            return True
+
+        # Count how many expected lines match somewhere in the vicinity
+        matches = 0
+        search_range = min(len(expected) + 5, len(lines) - pos)
+
+        for expected_line in expected:
+            expected_stripped = expected_line.rstrip()
+            # Look for this line near the position
+            for offset in range(search_range):
+                if pos + offset < len(lines):
+                    if lines[pos + offset].rstrip() == expected_stripped:
+                        matches += 1
+                        break
+
+        match_ratio = matches / len(expected) if expected else 0
+
+        # Also check if first line matches (critical for positioning)
+        first_matches = False
+        if expected and pos < len(lines):
+            first_matches = lines[pos].rstrip() == expected[0].rstrip()
+
+        # Accept if first line matches OR if enough total lines match
+        return first_matches or match_ratio >= min_match_ratio
 
     def apply_patch(
         self,

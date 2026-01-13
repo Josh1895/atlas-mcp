@@ -112,7 +112,18 @@ class VotingManager:
             )
         else:
             result.winner = leader
-            result.winning_solution = leader.representative if leader.is_valid else None
+            # If leader is invalid, find the best valid cluster
+            if leader.is_valid:
+                result.winning_solution = leader.representative
+            else:
+                # Find first valid cluster
+                for cluster in sorted_clusters:
+                    if cluster.is_valid and cluster.representative:
+                        result.winning_solution = cluster.representative
+                        logger.info(
+                            f"Leader invalid, using valid cluster {cluster.cluster_id}"
+                        )
+                        break
             result.consensus_reached = False
 
         self._history.append(result)

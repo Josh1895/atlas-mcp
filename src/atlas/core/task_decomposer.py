@@ -116,21 +116,74 @@ class TaskDecomposer:
         if not text:
             return None
 
-        fenced = re.search(r"```json\s*(\{[\s\S]+?\})\s*```", text)
+        # Strategy 1: Look for ```json ... ``` block with balanced braces
+        fenced = re.search(r"```json\s*(\{[\s\S]*\})\s*```", text)
         if fenced:
-            payload = fenced.group(1)
-        else:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                return None
-            payload = text[start : end + 1]
+            payload = self._extract_balanced_json(fenced.group(1))
+            if payload:
+                try:
+                    return json.loads(payload)
+                except json.JSONDecodeError:
+                    pass
 
-        try:
-            return json.loads(payload)
-        except json.JSONDecodeError:
-            logger.warning("Failed to decode JSON from LLM output")
+        # Strategy 2: Find outermost { } in entire text using balanced extraction
+        start = text.find("{")
+        if start != -1:
+            payload = self._extract_balanced_json(text[start:])
+            if payload:
+                try:
+                    return json.loads(payload)
+                except json.JSONDecodeError:
+                    pass
+
+        # Strategy 3: Fallback - try simple start/end with trailing comma fix
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end > start:
+            payload = text[start : end + 1]
+            # Remove trailing commas before } or ]
+            payload = re.sub(r",\s*([}\]])", r"\1", payload)
+            try:
+                return json.loads(payload)
+            except json.JSONDecodeError:
+                logger.warning("Failed to decode JSON from LLM output after all strategies")
+
+        return None
+
+    def _extract_balanced_json(self, text: str) -> str | None:
+        """Extract JSON object with balanced braces from text starting with {."""
+        if not text or not text.strip().startswith("{"):
             return None
+
+        text = text.strip()
+        depth = 0
+        in_string = False
+        escape = False
+
+        for i, char in enumerate(text):
+            if escape:
+                escape = False
+                continue
+
+            if char == "\\":
+                escape = True
+                continue
+
+            if char == '"' and not escape:
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[: i + 1]
+
+        return None
 
     def _build_dag_from_json(self, data: dict) -> TaskDAG:
         tasks_data = data.get("tasks", [])

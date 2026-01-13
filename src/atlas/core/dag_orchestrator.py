@@ -205,7 +205,8 @@ class TaskDAGOrchestrator:
                 component_names=submission.component_names,
             )
             repo_tools = RepoTools(indexer=self.repo_scout.indexer, report=scout_report)
-            self._repo_files = [file_info.path for file_info in scout_report.codebase_index.files]
+            # Normalize paths to forward slashes for consistency with patches
+            self._repo_files = [file_info.path.replace("\\", "/") for file_info in scout_report.codebase_index.files]
 
             self.decomposer = TaskDecomposer(
                 llm_client=self._maybe_llm(),
@@ -213,12 +214,17 @@ class TaskDAGOrchestrator:
             )
             dag = await self.decomposer.decompose(submission.description, scout_report)
             result.dag = dag
+            logger.info(f"Decomposed into {len(dag.tasks)} tasks")
 
             dag_errors = dag.validate()
             if dag_errors:
+                logger.warning(f"DAG validation errors: {dag_errors}")
                 result.status = "failed"
                 result.errors.extend(dag_errors)
                 return result
+
+            topo_order = dag.topological_order()
+            logger.info(f"Topological order: {[t.task_id for t in topo_order]}")
 
             base_state = RepoState(repo_path)
             working_state = RepoState(repo_path)
@@ -226,7 +232,8 @@ class TaskDAGOrchestrator:
             candidates_by_task: dict[str, list[TaskCandidate]] = {}
             task_results: dict[str, TaskExecutionResult] = {}
 
-            for task in dag.topological_order():
+            for task in topo_order:
+                logger.info(f"Executing task: {task.task_id}")
                 task_result = await self._execute_task(
                     task=task,
                     submission=submission,
@@ -338,13 +345,20 @@ class TaskDAGOrchestrator:
 
     def _build_repository_content(self, task: TaskSpec, repo_state: RepoState) -> str:
         files = self._select_files_for_context(task, repo_state)
+        logger.info(f"Selected files for context: {files}")
+        logger.info(f"Available repo files: {self._repo_files[:10]}")  # First 10
         parts: list[str] = []
         total = 0
 
         for path in files:
+            # Normalize path to forward slashes
+            norm_path = path.replace("\\", "/")
             content = repo_state.get_files([path]).get(path, "")
+            if not content:
+                # Try with normalized path
+                content = repo_state.get_files([norm_path]).get(norm_path, "")
             snippet = content[: self.execution_config.max_file_chars]
-            chunk = f"# File: {path}\n{snippet}"
+            chunk = f"# File: {norm_path}\n{snippet}"
             if total + len(chunk) > self.execution_config.max_context_chars:
                 break
             parts.append(chunk)
@@ -375,7 +389,10 @@ class TaskDAGOrchestrator:
         if ownership.allowed_globs:
             for path in self._repo_files:
                 for pattern in ownership.allowed_globs:
-                    if Path(path).match(pattern):
+                    # Handle **/* specially - it should match all files
+                    if pattern == "**/*" or pattern == "*":
+                        selected.append(path)
+                    elif Path(path).match(pattern):
                         selected.append(path)
 
         deduped = list(dict.fromkeys(selected))
@@ -423,6 +440,7 @@ class TaskDAGOrchestrator:
 
         for solution in solutions:
             if not solution.patch:
+                logger.debug(f"Agent {solution.agent_id}: No patch generated")
                 continue
 
             candidate = TaskCandidate(
@@ -435,26 +453,35 @@ class TaskDAGOrchestrator:
             if not patch_result.is_valid:
                 candidate.is_valid = False
                 candidate.validation_errors.extend(patch_result.errors)
+                logger.info(f"Agent {solution.agent_id}: Patch validation failed: {patch_result.errors}")
             candidate.warnings.extend(patch_result.warnings)
 
             analysis_result = self.static_analyzer.analyze_patch(solution.patch)
             if not analysis_result.is_valid:
                 candidate.is_valid = False
                 candidate.validation_errors.extend(analysis_result.errors)
+                logger.info(f"Agent {solution.agent_id}: Static analysis failed: {analysis_result.errors}")
             candidate.warnings.extend(analysis_result.warnings)
 
             ownership_result = self.ownership_validator.validate(solution.patch, task.ownership)
             if not ownership_result.is_valid:
                 candidate.is_valid = False
                 candidate.validation_errors.extend(ownership_result.errors)
+                logger.info(f"Agent {solution.agent_id}: Ownership validation failed: {ownership_result.errors}")
 
             apply_result = repo_state.preview_apply(solution.patch)
             if not apply_result.success:
                 candidate.is_valid = False
                 candidate.validation_errors.extend(apply_result.errors)
+                logger.info(f"Agent {solution.agent_id}: Patch apply failed: {apply_result.errors}")
+                # Log the patch target files for debugging
+                logger.debug(f"Patch targets: {self._union_touched_files([solution.patch])}")
 
             if candidate.is_valid:
+                logger.info(f"Agent {solution.agent_id}: Valid candidate!")
                 candidates.append(candidate)
+            else:
+                logger.info(f"Agent {solution.agent_id}: REJECTED - {candidate.validation_errors}")
 
         return candidates
 
