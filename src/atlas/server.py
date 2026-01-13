@@ -55,7 +55,7 @@ async def solve_issue(
         branch: Target branch (default: main)
         base_commit: Specific commit to base the fix on (optional)
         relevant_files: List of files likely to need changes (optional)
-        test_command: Command to run tests (optional, not used in MVP)
+    test_command: Command to run tests (optional, used as primary oracle)
         max_cost_usd: Maximum cost budget in USD (default: 2.0)
         timeout_minutes: Maximum time in minutes (default: 15)
 
@@ -85,7 +85,7 @@ async def solve_issue(
         max_cost_usd=max_cost_usd,
         timeout_minutes=timeout_minutes,
         voting_k=config.voting_k,
-        initial_samples=config.max_samples,
+        initial_samples=config.initial_samples,
         max_samples=config.max_samples * 3,
     )
 

@@ -3,6 +3,7 @@
 import pytest
 
 from atlas.core.task import Solution
+from atlas.verification.test_runner import TestResult
 from atlas.voting.consensus import IncrementalVoter, VotingManager
 
 
@@ -26,6 +27,7 @@ class TestVotingManager:
             agent_id="agent_0",
             prompt_style="minimal_diff",
             patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new",
+            test_result=TestResult(success=True, passed=1, total=1),
         )
 
         result = manager.vote([solution])
@@ -43,6 +45,7 @@ class TestVotingManager:
                 agent_id=f"agent_{i}",
                 prompt_style="minimal_diff",
                 patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new",
+                test_result=TestResult(success=True, passed=5, total=5),
             )
             for i in range(3)
         ]
@@ -50,6 +53,7 @@ class TestVotingManager:
             agent_id="agent_3",
             prompt_style="verbose",
             patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+different",
+            test_result=TestResult(success=False, failed=1, total=5),
         ))
 
         result = manager.vote(solutions)
@@ -61,27 +65,31 @@ class TestVotingManager:
         """Test that no consensus is reached when votes are split."""
         manager = VotingManager(k=3)
 
-        # Create 4 solutions: 2 of each type
+        # Create 4 solutions: different failing signatures
         solutions = [
             Solution(
                 agent_id="agent_0",
                 prompt_style="minimal_diff",
                 patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new",
+                test_result=TestResult(success=False, failed=1, total=3),
             ),
             Solution(
                 agent_id="agent_1",
                 prompt_style="minimal_diff",
                 patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new",
+                test_result=TestResult(success=False, failed=1, total=4),
             ),
             Solution(
                 agent_id="agent_2",
                 prompt_style="verbose",
                 patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+different",
+                test_result=TestResult(success=False, failed=2, total=4),
             ),
             Solution(
                 agent_id="agent_3",
                 prompt_style="verbose",
                 patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+different",
+                test_result=TestResult(success=False, failed=2, total=5),
             ),
         ]
 
@@ -104,6 +112,7 @@ class TestIncrementalVoter:
                 agent_id="agent_0",
                 prompt_style="minimal_diff",
                 patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new",
+                test_result=TestResult(success=True, passed=3, total=3),
             ),
         ]
         result1 = voter.add_solutions(batch1)
@@ -115,11 +124,13 @@ class TestIncrementalVoter:
                 agent_id="agent_1",
                 prompt_style="verbose",
                 patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new",
+                test_result=TestResult(success=True, passed=3, total=3),
             ),
             Solution(
                 agent_id="agent_2",
                 prompt_style="debugger",
                 patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new",
+                test_result=TestResult(success=True, passed=3, total=3),
             ),
         ]
         result2 = voter.add_solutions(batch2)
@@ -133,7 +144,12 @@ class TestIncrementalVoter:
 
         patch = "--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new"
         solutions = [
-            Solution(agent_id=f"agent_{i}", prompt_style="minimal_diff", patch=patch)
+            Solution(
+                agent_id=f"agent_{i}",
+                prompt_style="minimal_diff",
+                patch=patch,
+                test_result=TestResult(success=True, passed=2, total=2),
+            )
             for i in range(3)
         ]
 
@@ -152,6 +168,7 @@ class TestIncrementalVoter:
                 agent_id="agent_0",
                 prompt_style="minimal_diff",
                 patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new",
+                test_result=TestResult(success=False, failed=1, total=2),
             ),
         ]
         voter.add_solutions(solutions)

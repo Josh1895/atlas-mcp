@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from uuid import uuid4
 
 
@@ -20,6 +20,10 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
     TIMEOUT = "timeout"
     BUDGET_EXCEEDED = "budget_exceeded"
+
+
+if TYPE_CHECKING:
+    from atlas.verification.test_runner import TestResult
 
 
 @dataclass
@@ -166,6 +170,7 @@ class Solution:
     # Validation results
     is_valid: bool = True
     validation_errors: list[str] = field(default_factory=list)
+    test_result: "TestResult | None" = None
 
     # Clustering
     cluster_id: str | None = None

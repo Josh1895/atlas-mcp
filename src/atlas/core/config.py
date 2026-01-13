@@ -17,7 +17,7 @@ class Config:
     serpapi_api_key: str = ""  # Optional - enables better web search
 
     # Model configuration
-    model: str = "gemini-3-flash"
+    model: str = "gemini-3-flash-preview"
     temperature: float = 0.7
     max_output_tokens: int = 8192
 

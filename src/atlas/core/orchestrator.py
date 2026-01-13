@@ -9,12 +9,13 @@ Enhanced with:
 
 import asyncio
 import logging
+import re
 import shutil
 import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
 import git
@@ -45,7 +46,9 @@ from atlas.verification.behavioral_clustering import (
     select_best_patches,
 )
 from atlas.verification.clustering import calculate_diversity_score
-from atlas.verification.patch_applier import PatchApplier, create_patched_checkout
+from atlas.scout.repo_scout import RepoScout
+from atlas.scout.repo_tools import RepoTools
+from atlas.verification.patch_applier import PatchApplier, PatchParser, create_patched_checkout
 from atlas.verification.patch_validator import PatchValidator
 from atlas.verification.static_analysis import StaticAnalyzer
 from atlas.verification.test_runner import TestRunner, TestResult
@@ -103,6 +106,7 @@ class ATLASOrchestrator:
         self.patch_applier = PatchApplier()
         self.test_runner = TestRunner(timeout_seconds=300)
         self.repo_analyzer = RepoAnalyzer()
+        self.repo_scout = RepoScout()
         self.behavioral_clusterer = BehavioralClusterer(prioritize_passing=True)
 
         # Quality selection pipeline (initialized lazily with LLM client)
@@ -113,6 +117,8 @@ class ATLASOrchestrator:
         self._active_task: str | None = None
         self._repo_path: Optional[Path] = None  # Current repo path for test execution
         self._repo_context: Optional[RepoContext] = None  # Intelligent context
+        self._repo_report = None
+        self._repo_tools: Optional[RepoTools] = None
         self._repo_files: Dict[str, str] = {}  # Cache for quality selection
         self._verification_results: Dict[str, VerificationResult] = {}  # Test results per patch
 
@@ -170,8 +176,30 @@ class ATLASOrchestrator:
             self._repo_context = repo_context
             self._repo_files = repo_context.files
 
+            try:
+                keywords = self._extract_keywords_for_scout(task.description)
+                repo_report = await self.repo_scout.scan(
+                    repo_path,
+                    keywords=keywords,
+                    component_names=[],
+                )
+                self._repo_report = repo_report
+                self._repo_tools = RepoTools(
+                    indexer=self.repo_scout.indexer,
+                    report=repo_report,
+                )
+            except Exception as e:
+                trace.warnings.append(f"RepoScout failed: {e}")
+                self._repo_report = None
+                self._repo_tools = None
+
             # Format repo content for agents
             repo_content = self._format_context_for_agents(repo_context)
+            if self._repo_report:
+                repo_content = (
+                    f"{repo_content}\n\n"
+                    f"{self._repo_report.to_context_pack(max_chars=2500)}"
+                )
 
             # Phase 2: Generate patches with diverse agents
             trace.add_phase("generating")
@@ -181,6 +209,7 @@ class ATLASOrchestrator:
             context = AgentContext(
                 task=task,
                 repository_content=repo_content,
+                repo_tools=self._repo_tools,
             )
 
             # Run swarm and vote incrementally
@@ -273,6 +302,12 @@ class ATLASOrchestrator:
                     "clusters_found": len(behavioral_result.clusters),
                 })
 
+                behavioral_voter = IncrementalVoter(
+                    k=self.config.voting_k,
+                    similarity_threshold=0.8,
+                )
+                behavioral_voting_result = behavioral_voter.add_solutions(valid_patches)
+
                 # Select best patches from passing clusters
                 if behavioral_result.has_passing_patches:
                     logger.info(f"{behavioral_result.patches_all_pass} patches pass all tests!")
@@ -293,12 +328,19 @@ class ATLASOrchestrator:
                             solutions=passing_solutions,
                             task=task,
                             repo_context=repo_context,
+                            repo_path=repo_path,
                         )
 
                         if quality_result and quality_result.selection.best_patch_content:
                             result.patch = quality_result.selection.best_patch_content
-                            result.confidence_score = behavioral_result.confidence
-                            logger.info(f"Quality selection chose: {quality_result.selection.best_patch_id}")
+                            result.confidence_score = max(
+                                behavioral_result.confidence,
+                                behavioral_voting_result.confidence_score,
+                            )
+                            logger.info(
+                                "Quality selection chose: %s",
+                                quality_result.selection.best_patch_id,
+                            )
                         else:
                             # Use representative from largest passing cluster
                             best_cluster = behavioral_result.passing_clusters[0]
@@ -308,26 +350,35 @@ class ATLASOrchestrator:
                                 passing_solutions[0]
                             )
                             result.patch = best_solution.patch
-                            result.confidence_score = behavioral_result.confidence
+                            result.confidence_score = max(
+                                behavioral_result.confidence,
+                                behavioral_voting_result.confidence_score,
+                            )
                     else:
                         # Single passing patch or quality selection disabled
                         result.patch = passing_solutions[0].patch
-                        result.confidence_score = behavioral_result.confidence
+                        result.confidence_score = max(
+                            behavioral_result.confidence,
+                            behavioral_voting_result.confidence_score,
+                        )
 
-                    result.consensus_reached = True
+                    result.consensus_reached = behavioral_voting_result.consensus_reached
                     result.status = TaskStatus.COMPLETED
                 else:
                     # No patches pass all tests
                     logger.warning("No patches pass all tests")
                     trace.warnings.append("No patches passed all tests")
 
-                    # Fall back to similarity-based selection with reduced confidence
-                    if voting_result.winner:
-                        result.patch = voting_result.winner.patch
-                        result.confidence_score = voting_result.confidence_score * 0.3
+                    # Fall back to behavioral consensus on failing clusters
+                    if behavioral_voting_result.winning_solution:
+                        result.patch = behavioral_voting_result.winning_solution.patch
+                        result.confidence_score = behavioral_voting_result.confidence_score * 0.3
                         result.consensus_reached = False
                         result.status = TaskStatus.COMPLETED
-                        trace.warnings.append("Falling back to similarity consensus (no test-passing patches)")
+                        trace.warnings.append(
+                            "Falling back to behavioral consensus "
+                            "(no test-passing patches)"
+                        )
                     else:
                         result.status = TaskStatus.FAILED
                         result.error_message = "No patches pass tests and no similarity consensus"
@@ -335,7 +386,7 @@ class ATLASOrchestrator:
                 # Test execution disabled - fall back to original behavior
                 logger.info("Test execution disabled, using similarity-based selection")
 
-                if voting_result.winner:
+                if voting_result.winning_solution:
                     # Run quality selection if enabled
                     if self.enable_quality_selection and len(valid_patches) > 1:
                         trace.add_phase("quality_selection")
@@ -343,16 +394,17 @@ class ATLASOrchestrator:
                             solutions=valid_patches,
                             task=task,
                             repo_context=repo_context,
+                            repo_path=repo_path,
                         )
 
                         if quality_result and quality_result.selection.best_patch_content:
                             result.patch = quality_result.selection.best_patch_content
                             result.confidence_score = voting_result.confidence_score * 0.8
                         else:
-                            result.patch = voting_result.winner.patch
+                            result.patch = voting_result.winning_solution.patch
                             result.confidence_score = voting_result.confidence_score * 0.8
                     else:
-                        result.patch = voting_result.winner.patch
+                        result.patch = voting_result.winning_solution.patch
                         result.confidence_score = voting_result.confidence_score * 0.8
 
                     result.consensus_reached = voting_result.consensus_reached
@@ -384,6 +436,8 @@ class ATLASOrchestrator:
             self._active_task = None
             self._repo_path = None
             self._repo_context = None
+            self._repo_report = None
+            self._repo_tools = None
 
             # Clean up temp directory
             if temp_dir and Path(temp_dir).exists():
@@ -512,7 +566,10 @@ class ATLASOrchestrator:
         """
         parts = []
         parts.append(f"# Repository Context (Language: {repo_context.primary_language})")
-        parts.append(f"# Files: {repo_context.files_selected} selected from {repo_context.total_files_scanned} scanned")
+        parts.append(
+            f"# Files: {repo_context.files_selected} selected from "
+            f"{repo_context.total_files_scanned} scanned"
+        )
         parts.append("")
 
         # Sort files by relevance score
@@ -525,7 +582,11 @@ class ATLASOrchestrator:
         for path, content in sorted_files:
             relevance = repo_context.file_relevance.get(path)
             if relevance:
-                reasons = ", ".join(relevance.reasons[:3]) if relevance.reasons else "auto-selected"
+                reasons = (
+                    ", ".join(relevance.reasons[:3])
+                    if relevance.reasons
+                    else "auto-selected"
+                )
                 parts.append(f"# File: {path} (Relevance: {relevance.score:.1f}, {reasons})")
             else:
                 parts.append(f"# File: {path}")
@@ -572,10 +633,15 @@ class ATLASOrchestrator:
                     )
 
                     if not patched_path:
-                        return patch_id, TestResult(
+                        test_result = TestResult(
                             success=False,
-                            execution_error=f"Failed to apply patch: {'; '.join(apply_result.errors)}",
+                            execution_error=(
+                                "Failed to apply patch: "
+                                f"{'; '.join(apply_result.errors)}"
+                            ),
                         )
+                        solution.test_result = test_result
+                        return patch_id, test_result
 
                     try:
                         # Run tests
@@ -583,6 +649,7 @@ class ATLASOrchestrator:
                             patched_path,
                             test_command=test_command,
                         )
+                        solution.test_result = test_result
 
                         logger.info(
                             f"Patch {patch_id}: {'PASS' if test_result.success else 'FAIL'} "
@@ -605,10 +672,12 @@ class ATLASOrchestrator:
 
                 except Exception as e:
                     logger.error(f"Error testing patch {patch_id}: {e}")
-                    return patch_id, TestResult(
+                    test_result = TestResult(
                         success=False,
                         execution_error=str(e),
                     )
+                    solution.test_result = test_result
+                    return patch_id, test_result
 
         # Run all tests
         tasks = [test_patch(solution) for solution in patches]
@@ -624,6 +693,7 @@ class ATLASOrchestrator:
         solutions: List[Solution],
         task: TaskSubmission,
         repo_context: RepoContext,
+        repo_path: Path,
     ) -> Optional[QualitySelectionResult]:
         """Run quality selection on valid solutions.
 
@@ -660,8 +730,10 @@ class ATLASOrchestrator:
                     llm_client=llm_client,
                 )
 
-            # Get original files from repo context
-            original_files = repo_context.files
+            original_files = self._load_original_files_for_patches(
+                repo_path=repo_path,
+                patches=patches.values(),
+            )
 
             # Build ACTUALLY patched files map (FIX: no longer uses original files!)
             patched_files_map = {}
@@ -708,6 +780,56 @@ class ATLASOrchestrator:
             logger.error(f"Quality selection failed: {e}")
             return None
 
+    def _load_original_files_for_patches(
+        self,
+        repo_path: Path,
+        patches: List[str] | Iterable[str],
+    ) -> Dict[str, str]:
+        parser = PatchParser()
+        file_paths: list[str] = []
+
+        for patch in patches:
+            for file_patch in parser.parse(patch):
+                file_paths.append(file_patch.target_path)
+
+        unique_paths = list(dict.fromkeys(file_paths))
+        originals: Dict[str, str] = {}
+
+        for path in unique_paths:
+            full_path = repo_path / path
+            if full_path.exists():
+                originals[path] = full_path.read_text(encoding="utf-8", errors="replace")
+            else:
+                originals[path] = ""
+
+        return originals
+
+    def _extract_keywords_for_scout(self, description: str) -> List[str]:
+        stopwords = {
+            "the", "and", "for", "with", "that", "this", "from", "into", "when",
+            "where", "what", "which", "should", "could", "would", "there", "their",
+            "about", "these", "those", "have", "has", "had", "been", "being",
+            "will", "can", "just", "only", "your", "you", "our", "are", "was",
+            "were", "use", "using", "used", "please", "fix", "bug", "issue",
+            "error", "problem", "feature", "request", "implement", "add", "update",
+            "change", "modify",
+        }
+
+        words = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", description.lower())
+        keywords = []
+        seen = set()
+        for word in words:
+            if word in stopwords or len(word) < 3:
+                continue
+            if word in seen:
+                continue
+            seen.add(word)
+            keywords.append(word)
+            if len(keywords) >= 12:
+                break
+
+        return keywords
+
     def _validate_solutions(self, solutions: list[Solution]) -> list[Solution]:
         """Validate solutions using static analysis.
 
@@ -743,6 +865,18 @@ class ATLASOrchestrator:
             # Add warnings (don't affect validity)
             solution.validation_errors.extend(analysis_result.warnings)
             solution.validation_errors.extend(patch_result.warnings)
+
+            # Verify patch applies cleanly against the repo
+            if self._repo_path:
+                apply_result = self.patch_validator.try_apply(
+                    solution.patch,
+                    self._repo_path,
+                    dry_run=True,
+                )
+                if not apply_result.can_apply:
+                    solution.is_valid = False
+                    solution.validation_errors.extend(apply_result.errors)
+                solution.validation_errors.extend(apply_result.warnings)
 
             validated.append(solution)
 

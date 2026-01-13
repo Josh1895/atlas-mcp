@@ -187,7 +187,11 @@ class RepoScout:
                 test_files.append(path)
             elif path.endswith("_test.py") or path.endswith("test.py"):
                 test_files.append(path)
-            elif path.endswith(".spec.ts") or path.endswith(".spec.tsx") or path.endswith(".spec.js"):
+            elif (
+                path.endswith(".spec.ts")
+                or path.endswith(".spec.tsx")
+                or path.endswith(".spec.js")
+            ):
                 test_files.append(path)
         return frameworks, sorted(set(test_files))
 

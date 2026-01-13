@@ -567,15 +567,26 @@ class TaskDAGOrchestrator:
         repo_path = Path(temp_dir) / "repo"
 
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: git.Repo.clone_from(
-                submission.repository_url,
-                repo_path,
-                branch=submission.branch,
-                depth=1,
-            ),
-        )
+        use_shallow = submission.base_commit is None
+        if use_shallow:
+            await loop.run_in_executor(
+                None,
+                lambda: git.Repo.clone_from(
+                    submission.repository_url,
+                    repo_path,
+                    branch=submission.branch,
+                    depth=1,
+                ),
+            )
+        else:
+            await loop.run_in_executor(
+                None,
+                lambda: git.Repo.clone_from(
+                    submission.repository_url,
+                    repo_path,
+                    branch=submission.branch,
+                ),
+            )
 
         if submission.base_commit:
             repo = git.Repo(repo_path)

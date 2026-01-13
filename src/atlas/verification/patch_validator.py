@@ -228,16 +228,63 @@ class PatchValidator:
             result.can_apply = False
             return result
 
-        # Try to apply the patch
-        try:
-            # For now, we do a simple check if the target files exist
-            for filename in result.patch_info.files_modified:
-                target_file = target_dir / filename
-                if not target_file.exists():
-                    # This is okay for new files
-                    continue
+        if not target_dir.exists():
+            result.can_apply = False
+            result.add_error(f"Target directory does not exist: {target_dir}")
+            return result
 
-            result.can_apply = True
+        # Try git apply --check if repo is available
+        git_dir = target_dir / ".git"
+        if git_dir.exists():
+            try:
+                import subprocess
+
+                check = subprocess.run(
+                    ["git", "apply", "--check", "-"],
+                    input=patch,
+                    text=True,
+                    cwd=str(target_dir),
+                    capture_output=True,
+                )
+                if check.returncode == 0:
+                    result.can_apply = True
+                    return result
+
+                result.can_apply = False
+                error = check.stderr.strip() or "git apply --check failed"
+                result.add_error(error)
+                return result
+            except Exception as e:
+                result.add_warning(f"git apply --check failed: {e}")
+
+        # Fallback: apply patch in memory using PatchApplier
+        try:
+            from atlas.verification.patch_applier import PatchApplier, PatchParser
+
+            parser = PatchParser()
+            file_patches = parser.parse(patch)
+            original_files = {}
+
+            for file_patch in file_patches:
+                target_path = file_patch.target_path
+                full_path = target_dir / target_path
+                if full_path.exists():
+                    original_files[target_path] = full_path.read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                else:
+                    original_files[target_path] = ""
+
+            applier = PatchApplier()
+            apply_result = applier.apply_patch(patch, original_files)
+            result.can_apply = apply_result.success
+
+            if not apply_result.success:
+                for error in apply_result.errors:
+                    result.add_error(error)
+            for warning in apply_result.warnings:
+                result.add_warning(warning)
 
         except Exception as e:
             result.can_apply = False

@@ -297,7 +297,12 @@ class CodebaseIndexer:
                 ("class", re.compile(r"\bclass\s+(\w+)")),
                 ("interface", re.compile(r"\binterface\s+(\w+)")),
                 ("enum", re.compile(r"\benum\s+(\w+)")),
-                ("method", re.compile(r"\b(?:public|private|protected)?\s*(?:static\s+)?\w+\s+(\w+)\s*\(")),
+                (
+                    "method",
+                    re.compile(
+                        r"\b(?:public|private|protected)?\s*(?:static\s+)?\w+\s+(\w+)\s*\("
+                    ),
+                ),
             ]
         if extension == ".rb":
             return [
@@ -357,7 +362,11 @@ class CodebaseIndexer:
                 continue
             path, line_no, preview = parts[0], parts[1], parts[2]
             results.append(
-                CodeSearchResult(path=str(Path(path).relative_to(repo_path)), line=int(line_no), preview=preview)
+                CodeSearchResult(
+                    path=str(Path(path).relative_to(repo_path)),
+                    line=int(line_no),
+                    preview=preview,
+                )
             )
         return results
 
@@ -417,4 +426,3 @@ class CodebaseIndexer:
 
         slice_lines = content[start_line - 1 : end_line]
         return "\n".join(slice_lines)
-

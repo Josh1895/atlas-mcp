@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class VotingResult:
     """Result from a voting round."""
 
-    winner: Cluster | None = None
+    winner: Any | None = None
     winning_solution: Solution | None = None
     consensus_reached: bool = False
     vote_counts: dict[str, int] = field(default_factory=dict)
@@ -69,17 +69,17 @@ class VotingManager:
         """
         self._round_number += 1
 
-        # Cluster the solutions
-        clustering_result = self.clustering.cluster(solutions)
+        if self._has_behavioral_data(solutions):
+            result = self._vote_behavioral(solutions)
+            self._history.append(result)
+            return result
 
-        # Merge similar clusters for more accurate voting
+        # Cluster the solutions by similarity
+        clustering_result = self.clustering.cluster(solutions)
         clustering_result = self.clustering.merge_similar_clusters(clustering_result)
 
-        # Count votes (each solution is one vote for its cluster)
         vote_counts = clustering_result.get_cluster_sizes()
         total_votes = sum(vote_counts.values())
-
-        # Find the leader and runner-up
         sorted_clusters = sorted(
             clustering_result.clusters,
             key=lambda c: c.size,
@@ -102,7 +102,6 @@ class VotingManager:
         margin = leader.size - runner_up_size
         result.margin = margin
 
-        # Check if consensus is reached (leader ahead by K)
         if margin >= self.k and leader.is_valid:
             result.winner = leader
             result.winning_solution = leader.representative
@@ -112,12 +111,81 @@ class VotingManager:
                 f"{leader.cluster_id} leads by {margin} votes"
             )
         else:
-            # No consensus yet
-            result.winner = leader  # Current leader, but not final
+            result.winner = leader
             result.winning_solution = leader.representative if leader.is_valid else None
             result.consensus_reached = False
 
         self._history.append(result)
+        return result
+
+    def _has_behavioral_data(self, solutions: list[Solution]) -> bool:
+        if not solutions:
+            return False
+        return all(getattr(s, "test_result", None) is not None for s in solutions)
+
+    def _vote_behavioral(self, solutions: list[Solution]) -> VotingResult:
+        from atlas.verification.behavioral_clustering import cluster_by_test_outcomes
+
+        test_results = {
+            solution.agent_id: solution.test_result
+            for solution in solutions
+            if solution.test_result is not None
+        }
+
+        clustering = cluster_by_test_outcomes(test_results)
+        vote_counts = {c.cluster_id: c.size for c in clustering.clusters}
+        total_votes = sum(vote_counts.values())
+
+        result = VotingResult(
+            vote_counts=vote_counts,
+            total_votes=total_votes,
+            round_number=self._round_number,
+        )
+
+        if not clustering.clusters:
+            return result
+
+        if clustering.passing_clusters:
+            sorted_clusters = sorted(
+                clustering.passing_clusters,
+                key=lambda c: c.size,
+                reverse=True,
+            )
+        else:
+            sorted_clusters = sorted(
+                clustering.clusters,
+                key=lambda c: c.size,
+                reverse=True,
+            )
+
+        leader = sorted_clusters[0]
+        runner_up_size = sorted_clusters[1].size if len(sorted_clusters) > 1 else 0
+        margin = leader.size - runner_up_size
+        result.margin = margin
+        result.winner = leader
+
+        winning_solution = None
+        if getattr(leader, "representative_patch_id", ""):
+            winning_solution = next(
+                (s for s in solutions if s.agent_id == leader.representative_patch_id),
+                None,
+            )
+        if not winning_solution and getattr(leader, "patch_ids", None):
+            winning_solution = next(
+                (s for s in solutions if s.agent_id == leader.patch_ids[0]),
+                None,
+            )
+
+        result.winning_solution = winning_solution
+
+        has_passing = bool(clustering.passing_clusters)
+        if margin >= self.k and (leader.all_pass or not has_passing):
+            result.consensus_reached = True
+            logger.info(
+                f"Behavioral consensus reached in round {self._round_number}: "
+                f"{leader.cluster_id} leads by {margin} votes"
+            )
+
         return result
 
     def get_best_effort(self) -> Solution | None:
@@ -172,7 +240,11 @@ class VotingManager:
         return {
             "rounds": self._round_number,
             "consensus_reached": any(r.consensus_reached for r in self._history),
-            "final_winner": self._history[-1].winner.cluster_id if self._history and self._history[-1].winner else None,
+            "final_winner": (
+                self._history[-1].winner.cluster_id
+                if self._history and self._history[-1].winner
+                else None
+            ),
             "final_margin": self._history[-1].margin if self._history else 0,
             "history": [
                 {
