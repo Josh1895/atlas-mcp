@@ -1,0 +1,563 @@
+{
+  "feature_id": "SWARM-001",
+  "plan_link": ".speckit/specs/swarm-001/plan.md",
+  "created_at": "2025-01-13T00:00:00Z",
+  "phases": {
+    "1": [
+      {
+        "id": "T-101",
+        "description": "Copy Agent-MCP Python source into unified codebase",
+        "story_id": "",
+        "phase": 1,
+        "parallel": false,
+        "file_paths": ["agent_mcp/"],
+        "dependencies": [],
+        "acceptance_criteria": [
+          "agent_mcp/ directory exists with all Python modules",
+          "No import errors when loading agent_mcp package"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-102",
+        "description": "Add swarm feature flags to agent_mcp/core/config.py",
+        "story_id": "US-007",
+        "phase": 1,
+        "parallel": false,
+        "file_paths": ["agent_mcp/core/config.py"],
+        "dependencies": ["T-101"],
+        "acceptance_criteria": [
+          "SWARM_ENABLED flag reads from environment",
+          "SWARM_PATCH_MODE_ENABLED flag exists",
+          "SWARM_ANSWER_MODE_ENABLED flag exists",
+          "SWARM_ENABLE_WEB flag exists",
+          "SWARM_ENABLE_CONTEXT7 flag exists",
+          "SWARM_ENABLE_TEST_VERIFICATION flag exists",
+          "All flags default to False for backward compatibility"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-103",
+        "description": "Add swarm_runs table to agent_mcp/db/schema.py",
+        "story_id": "US-001",
+        "phase": 1,
+        "parallel": true,
+        "file_paths": ["agent_mcp/db/schema.py"],
+        "dependencies": ["T-101"],
+        "acceptance_criteria": [
+          "swarm_runs table created with all columns from spec",
+          "Table creation is conditional (CREATE IF NOT EXISTS)",
+          "Migration handles existing databases"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-104",
+        "description": "Add swarm_agents table to agent_mcp/db/schema.py",
+        "story_id": "US-001",
+        "phase": 1,
+        "parallel": true,
+        "file_paths": ["agent_mcp/db/schema.py"],
+        "dependencies": ["T-101"],
+        "acceptance_criteria": [
+          "swarm_agents table with composite PK (run_id, swarm_agent_id)",
+          "All columns from spec present"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-105",
+        "description": "Add swarm_outputs table to agent_mcp/db/schema.py",
+        "story_id": "US-001",
+        "phase": 1,
+        "parallel": true,
+        "file_paths": ["agent_mcp/db/schema.py"],
+        "dependencies": ["T-101"],
+        "acceptance_criteria": [
+          "swarm_outputs table with composite PK",
+          "All columns from spec present"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-106",
+        "description": "Add tool_cache table to agent_mcp/db/schema.py",
+        "story_id": "US-005",
+        "phase": 1,
+        "parallel": true,
+        "file_paths": ["agent_mcp/db/schema.py"],
+        "dependencies": ["T-101"],
+        "acceptance_criteria": [
+          "tool_cache table with cache_key PK",
+          "expires_at column for TTL support",
+          "hit_count for cache statistics"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-107",
+        "description": "Add tool_calls table to agent_mcp/db/schema.py",
+        "story_id": "US-005",
+        "phase": 1,
+        "parallel": true,
+        "file_paths": ["agent_mcp/db/schema.py"],
+        "dependencies": ["T-101"],
+        "acceptance_criteria": [
+          "tool_calls table for audit logging",
+          "Index on (run_id) for efficient queries",
+          "Index on (tool_name, created_at)"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-108",
+        "description": "Create agent_mcp/features/swarm/ package structure",
+        "story_id": "",
+        "phase": 1,
+        "parallel": false,
+        "file_paths": [
+          "agent_mcp/features/swarm/__init__.py",
+          "agent_mcp/features/swarm/schemas.py"
+        ],
+        "dependencies": ["T-101"],
+        "acceptance_criteria": [
+          "__init__.py exports main classes",
+          "schemas.py defines SwarmRequest, SwarmResult, SwarmMode dataclasses"
+        ],
+        "completed": false
+      }
+    ],
+    "2": [
+      {
+        "id": "T-201",
+        "description": "Implement persistence.py with DB access functions for swarm tables",
+        "story_id": "US-001",
+        "phase": 2,
+        "parallel": false,
+        "file_paths": ["agent_mcp/features/swarm/persistence.py"],
+        "dependencies": ["T-103", "T-104", "T-105", "T-106", "T-107"],
+        "acceptance_criteria": [
+          "save_swarm_run() writes to swarm_runs via execute_db_write",
+          "save_swarm_agent() writes to swarm_agents",
+          "save_swarm_output() writes to swarm_outputs",
+          "get_swarm_run() retrieves run by run_id",
+          "update_swarm_run_status() updates status field",
+          "All functions handle SQLite errors gracefully"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-202",
+        "description": "Implement budget_manager.py for resource limit enforcement",
+        "story_id": "US-006",
+        "phase": 2,
+        "parallel": true,
+        "file_paths": ["agent_mcp/features/swarm/budget_manager.py"],
+        "dependencies": ["T-108"],
+        "acceptance_criteria": [
+          "BudgetManager tracks cost, tokens, tool_calls, elapsed_time",
+          "check_budget() returns (ok, reason) tuple",
+          "record_cost() increments running totals",
+          "is_exceeded property for quick checks",
+          "get_remaining() returns budget headroom"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-203",
+        "description": "Implement repo_resolver.py for local/remote repo resolution",
+        "story_id": "US-001",
+        "phase": 2,
+        "parallel": true,
+        "file_paths": ["agent_mcp/features/swarm/repo_resolver.py"],
+        "dependencies": ["T-108"],
+        "acceptance_criteria": [
+          "RepoResolver.resolve() returns resolved path",
+          "Local mode uses MCP_PROJECT_DIR",
+          "Remote mode clones to temp directory",
+          "Worktree support via WorktreeManager integration",
+          "Cleanup method for remote clones"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-204",
+        "description": "Implement tool_router.py with caching and rate limiting",
+        "story_id": "US-005",
+        "phase": 2,
+        "parallel": false,
+        "file_paths": ["agent_mcp/features/swarm/tool_router.py"],
+        "dependencies": ["T-106", "T-107", "T-201"],
+        "acceptance_criteria": [
+          "ToolRouter checks tool permissions before calls",
+          "Cache lookup before external call",
+          "Cache write after successful call",
+          "Rate limiter with token bucket per tool",
+          "Circuit breaker with configurable thresholds",
+          "All calls logged to tool_calls table"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-205",
+        "description": "Implement context_builder.py for building swarm context from task/memory",
+        "story_id": "US-002",
+        "phase": 2,
+        "parallel": true,
+        "file_paths": ["agent_mcp/features/swarm/context_builder.py"],
+        "dependencies": ["T-108"],
+        "acceptance_criteria": [
+          "ContextBuilder.build() assembles context pack",
+          "Includes task description and notes",
+          "Includes parent task chain (up to depth K)",
+          "Includes project_context entries (allowlist)",
+          "Includes RAG hits (top N chunks)",
+          "Deduplication of content",
+          "Token budget enforcement"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-206",
+        "description": "Implement memory_writer.py for writing results back to Agent-MCP",
+        "story_id": "US-001",
+        "phase": 2,
+        "parallel": true,
+        "file_paths": ["agent_mcp/features/swarm/memory_writer.py"],
+        "dependencies": ["T-108", "T-201"],
+        "acceptance_criteria": [
+          "MemoryWriter.write_to_task() updates task notes",
+          "MemoryWriter.write_to_project_context() stores summary",
+          "MemoryWriter.index_to_rag() optionally indexes output",
+          "All writes respect memory policy flags"
+        ],
+        "completed": false
+      }
+    ],
+    "3": [
+      {
+        "id": "T-301",
+        "description": "Implement atlas_adapter.py wrapping Atlas AgentPoolManager",
+        "story_id": "US-001",
+        "phase": 3,
+        "parallel": false,
+        "file_paths": ["agent_mcp/features/swarm/atlas_adapter.py"],
+        "dependencies": ["T-108"],
+        "acceptance_criteria": [
+          "AtlasAdapter imports Atlas library classes",
+          "generate_candidates_patch_mode() creates swarm and runs agents",
+          "generate_candidates_answer_mode() adapts for answer output",
+          "Proper handling of agent failures",
+          "Cost/token tracking per agent"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-302",
+        "description": "Implement consensus_engine.py for clustering and voting",
+        "story_id": "US-001",
+        "phase": 3,
+        "parallel": false,
+        "file_paths": ["agent_mcp/features/swarm/consensus_engine.py"],
+        "dependencies": ["T-301"],
+        "acceptance_criteria": [
+          "ConsensusEngine.cluster_and_vote() orchestrates selection",
+          "Uses Atlas SimilarityClustering for patch mode",
+          "Uses embedding clustering for answer mode",
+          "Implements first-to-ahead-by-K consensus rule",
+          "Returns winning cluster rep and confidence score",
+          "Tie-breaker logic implemented"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-303",
+        "description": "Implement answer_clustering.py for answer mode embedding clustering",
+        "story_id": "US-003",
+        "phase": 3,
+        "parallel": true,
+        "file_paths": ["agent_mcp/features/swarm/answer_clustering.py"],
+        "dependencies": ["T-108"],
+        "acceptance_criteria": [
+          "Compute embeddings using Agent-MCP embedding model",
+          "K-means clustering with cosine distance",
+          "Medoid selection for cluster representatives",
+          "Citation presence detection"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-304",
+        "description": "Implement swarm_manager.py orchestrating full swarm workflow",
+        "story_id": "US-001",
+        "phase": 3,
+        "parallel": false,
+        "file_paths": ["agent_mcp/features/swarm/swarm_manager.py"],
+        "dependencies": ["T-201", "T-202", "T-203", "T-204", "T-205", "T-206", "T-301", "T-302"],
+        "acceptance_criteria": [
+          "SwarmManager.run() is main entry point",
+          "Orchestrates: resolve repo -> build context -> generate candidates -> cluster -> vote -> persist -> write back",
+          "Handles timeout with best-effort result",
+          "Handles budget exceeded with partial result",
+          "Returns SwarmResult with all fields populated"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-305",
+        "description": "Implement swarm_tools.py with run_swarm_consensus MCP tool",
+        "story_id": "US-001",
+        "phase": 3,
+        "parallel": false,
+        "file_paths": ["agent_mcp/tools/swarm_tools.py"],
+        "dependencies": ["T-102", "T-304"],
+        "acceptance_criteria": [
+          "Tool registered via register_tool()",
+          "Input schema matches spec",
+          "Auth via verify_token()",
+          "Feature flag check (SWARM_ENABLED)",
+          "Calls SwarmManager.run()",
+          "Returns JSON SwarmResult"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-306",
+        "description": "Register swarm_tools in agent_mcp/tools/__init__.py",
+        "story_id": "US-001",
+        "phase": 3,
+        "parallel": false,
+        "file_paths": ["agent_mcp/tools/__init__.py"],
+        "dependencies": ["T-305"],
+        "acceptance_criteria": [
+          "Import swarm_tools module",
+          "Tool appears in list_available_tools() when SWARM_ENABLED=true",
+          "Tool hidden when SWARM_ENABLED=false"
+        ],
+        "completed": false
+      }
+    ],
+    "4": [
+      {
+        "id": "T-401",
+        "description": "Integrate Atlas patch verification (PatchApplier, TestRunner)",
+        "story_id": "US-004",
+        "phase": 4,
+        "parallel": false,
+        "file_paths": ["agent_mcp/features/swarm/atlas_adapter.py"],
+        "dependencies": ["T-301"],
+        "acceptance_criteria": [
+          "validate_and_score_patch_candidates() applies patches in sandbox",
+          "Runs tests via TestRunner if test_command provided",
+          "Returns test results per candidate",
+          "Integrates QualityScorer for scoring"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-402",
+        "description": "Implement behavioral clustering when tests available",
+        "story_id": "US-004",
+        "phase": 4,
+        "parallel": false,
+        "file_paths": ["agent_mcp/features/swarm/consensus_engine.py"],
+        "dependencies": ["T-302", "T-401"],
+        "acceptance_criteria": [
+          "cluster_by_test_outcomes() groups by pass/fail",
+          "Passing clusters preferred in consensus",
+          "Falls back to similarity clustering if no passing"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-403",
+        "description": "Integrate web search via ToolRouter",
+        "story_id": "US-003",
+        "phase": 4,
+        "parallel": true,
+        "file_paths": ["agent_mcp/features/swarm/tool_router.py"],
+        "dependencies": ["T-204"],
+        "acceptance_criteria": [
+          "web_search() method calls Atlas WebSearchClient",
+          "Caching with 7-day TTL",
+          "Domain allow/deny list support",
+          "Rate limiting (2 RPS default)"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-404",
+        "description": "Integrate Context7 via ToolRouter",
+        "story_id": "US-003",
+        "phase": 4,
+        "parallel": true,
+        "file_paths": ["agent_mcp/features/swarm/tool_router.py"],
+        "dependencies": ["T-204"],
+        "acceptance_criteria": [
+          "context7() method calls Atlas Context7Client",
+          "Caching with 7-day TTL",
+          "Rate limiting (1 RPS default)"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-405",
+        "description": "Integrate Agent-MCP RAG via ToolRouter",
+        "story_id": "US-002",
+        "phase": 4,
+        "parallel": true,
+        "file_paths": ["agent_mcp/features/swarm/tool_router.py"],
+        "dependencies": ["T-204"],
+        "acceptance_criteria": [
+          "agent_mcp_rag() method queries local RAG",
+          "Short TTL caching (10 min)",
+          "Respects RAG query limits"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-406",
+        "description": "Implement circuit breaker for tool providers",
+        "story_id": "US-005",
+        "phase": 4,
+        "parallel": false,
+        "file_paths": ["agent_mcp/features/swarm/tool_router.py"],
+        "dependencies": ["T-204"],
+        "acceptance_criteria": [
+          "CircuitBreaker class with open/closed/half-open states",
+          "Opens after N consecutive failures",
+          "Closes after cooldown period",
+          "Fast-fails when open with cached error"
+        ],
+        "completed": false
+      }
+    ],
+    "5": [
+      {
+        "id": "T-501",
+        "description": "Add structured logging with run_id correlation",
+        "story_id": "",
+        "phase": 5,
+        "parallel": true,
+        "file_paths": ["agent_mcp/features/swarm/swarm_manager.py"],
+        "dependencies": ["T-304"],
+        "acceptance_criteria": [
+          "All log messages include run_id",
+          "Structured log format (JSON optional)",
+          "Log levels: DEBUG for detailed, INFO for milestones, ERROR for failures"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-502",
+        "description": "Implement metrics collection (latency, cost, consensus rate)",
+        "story_id": "",
+        "phase": 5,
+        "parallel": true,
+        "file_paths": ["agent_mcp/features/swarm/swarm_manager.py"],
+        "dependencies": ["T-304"],
+        "acceptance_criteria": [
+          "Metrics stored in metrics_json field",
+          "duration_ms, cost_usd, tokens_total, tool_calls_count tracked",
+          "Optional Prometheus-compatible export"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-503",
+        "description": "Write unit tests for SwarmManager",
+        "story_id": "",
+        "phase": 5,
+        "parallel": true,
+        "file_paths": ["tests/features/swarm/test_swarm_manager.py"],
+        "dependencies": ["T-304"],
+        "acceptance_criteria": [
+          "Test happy path with mocked AtlasAdapter",
+          "Test timeout handling",
+          "Test budget enforcement",
+          "Test partial failure handling"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-504",
+        "description": "Write unit tests for ConsensusEngine",
+        "story_id": "",
+        "phase": 5,
+        "parallel": true,
+        "file_paths": ["tests/features/swarm/test_consensus_engine.py"],
+        "dependencies": ["T-302"],
+        "acceptance_criteria": [
+          "Test first-to-ahead-by-K rule",
+          "Test tie-breaker logic",
+          "Test behavioral clustering preference"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-505",
+        "description": "Write unit tests for ToolRouter",
+        "story_id": "",
+        "phase": 5,
+        "parallel": true,
+        "file_paths": ["tests/features/swarm/test_tool_router.py"],
+        "dependencies": ["T-204"],
+        "acceptance_criteria": [
+          "Test cache hit/miss behavior",
+          "Test rate limiting",
+          "Test circuit breaker state transitions",
+          "Test permission enforcement"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-506",
+        "description": "Write integration test for end-to-end swarm run",
+        "story_id": "US-001",
+        "phase": 5,
+        "parallel": false,
+        "file_paths": ["tests/integration/test_swarm_e2e.py"],
+        "dependencies": ["T-305", "T-503", "T-504", "T-505"],
+        "acceptance_criteria": [
+          "Test run_swarm_consensus tool call",
+          "Verify DB records created",
+          "Verify task notes updated",
+          "Mock LLM responses for determinism"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-507",
+        "description": "Implement offline replay harness for golden tests",
+        "story_id": "",
+        "phase": 5,
+        "parallel": false,
+        "file_paths": ["tests/golden/test_consensus_determinism.py"],
+        "dependencies": ["T-302"],
+        "acceptance_criteria": [
+          "Load stored candidate outputs from fixtures",
+          "Re-run only clustering/voting",
+          "Assert deterministic selection",
+          "Fixtures for at least 3 scenarios"
+        ],
+        "completed": false
+      },
+      {
+        "id": "T-508",
+        "description": "Test backward compatibility with SWARM_ENABLED=false",
+        "story_id": "US-007",
+        "phase": 5,
+        "parallel": false,
+        "file_paths": ["tests/integration/test_backward_compat.py"],
+        "dependencies": ["T-306"],
+        "acceptance_criteria": [
+          "Existing Agent-MCP tests pass with swarm disabled",
+          "run_swarm_consensus returns error when disabled",
+          "No swarm_runs records created when disabled"
+        ],
+        "completed": false
+      }
+    ]
+  }
+}

@@ -19,6 +19,7 @@ from atlas.core.dag_orchestrator import (
     get_dag_orchestrator,
 )
 from atlas.core.task_dag import TaskDAG
+from atlas.speckit import tools as speckit_tools
 
 # Configure logging
 logging.basicConfig(
@@ -320,6 +321,313 @@ async def get_config_info() -> dict[str, Any]:
         "has_context7_key": bool(config.context7_api_key),
         "is_valid": config.is_valid(),
     }
+
+
+# ============================================================================
+# SpecKit Tools - Specification-driven development
+# ============================================================================
+
+
+@mcp.tool()
+async def speckit_init(
+    repo_path: str,
+    project_name: str | None = None,
+) -> dict[str, Any]:
+    """Initialize a SpecKit in a repository.
+
+    Creates the .speckit directory structure with default constitution.
+    This is the first step in spec-driven development.
+
+    Args:
+        repo_path: Path to the repository root.
+        project_name: Optional project name for the constitution.
+
+    Returns:
+        Dictionary with initialization status and paths.
+    """
+    return await speckit_tools.speckit_init(repo_path, project_name)
+
+
+@mcp.tool()
+async def speckit_constitution(
+    repo_path: str,
+    project_name: str | None = None,
+    principles: list[dict[str, Any]] | None = None,
+    coding_standards: list[str] | None = None,
+    testing_requirements: list[str] | None = None,
+    documentation_standards: list[str] | None = None,
+    forbidden_patterns: list[str] | None = None,
+    required_patterns: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create or update the project constitution.
+
+    The constitution defines governance principles for the project,
+    including coding standards, testing requirements, and forbidden patterns.
+
+    Args:
+        repo_path: Path to the repository root.
+        project_name: Project name for the constitution.
+        principles: List of principle definitions with keys:
+            - id: Principle identifier (e.g., "P-001")
+            - title: Short title
+            - description: Full description
+            - rationale: Why this principle exists
+            - examples: List of examples
+        coding_standards: List of coding standards.
+        testing_requirements: List of testing requirements.
+        documentation_standards: List of documentation standards.
+        forbidden_patterns: List of forbidden code patterns (regex).
+        required_patterns: List of required code patterns (regex).
+
+    Returns:
+        Dictionary with the saved constitution.
+    """
+    return await speckit_tools.speckit_constitution(
+        repo_path=repo_path,
+        project_name=project_name,
+        principles=principles,
+        coding_standards=coding_standards,
+        testing_requirements=testing_requirements,
+        documentation_standards=documentation_standards,
+        forbidden_patterns=forbidden_patterns,
+        required_patterns=required_patterns,
+    )
+
+
+@mcp.tool()
+async def speckit_specify(
+    repo_path: str,
+    feature_id: str,
+    title: str,
+    description: str,
+    user_scenarios: list[dict[str, Any]] | None = None,
+    functional_requirements: list[dict[str, Any]] | None = None,
+    data_entities: list[dict[str, Any]] | None = None,
+    success_criteria: list[dict[str, Any]] | None = None,
+    assumptions: list[str] | None = None,
+    constraints: list[str] | None = None,
+    open_questions: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create or update a feature specification.
+
+    Defines the WHAT - functional requirements, user scenarios,
+    and acceptance criteria for a feature.
+
+    Args:
+        repo_path: Path to the repository root.
+        feature_id: Unique identifier for the feature (e.g., "AUTH-001").
+        title: Human-readable title.
+        description: Description of what the feature does.
+        user_scenarios: List of user scenario definitions with keys:
+            - id: Scenario identifier
+            - title: Scenario title
+            - description: What the user is trying to do
+            - priority: P1/P2/P3
+            - given: List of preconditions
+            - when: List of actions
+            - then: List of expected outcomes
+            - edge_cases: List of edge cases
+        functional_requirements: List of requirement definitions with keys:
+            - id: Requirement ID (e.g., "FR-001")
+            - description: What MUST/SHOULD/MAY happen
+            - requirement_type: MUST, SHOULD, or MAY
+            - needs_clarification: Boolean
+            - clarification_notes: Notes if needs clarification
+        data_entities: List of data entity definitions.
+        success_criteria: List of success criteria.
+        assumptions: List of assumptions.
+        constraints: List of constraints.
+        open_questions: List of open questions.
+
+    Returns:
+        Dictionary with the saved specification.
+    """
+    return await speckit_tools.speckit_specify(
+        repo_path=repo_path,
+        feature_id=feature_id,
+        title=title,
+        description=description,
+        user_scenarios=user_scenarios,
+        functional_requirements=functional_requirements,
+        data_entities=data_entities,
+        success_criteria=success_criteria,
+        assumptions=assumptions,
+        constraints=constraints,
+        open_questions=open_questions,
+    )
+
+
+@mcp.tool()
+async def speckit_plan(
+    repo_path: str,
+    feature_id: str,
+    summary: str,
+    language: str = "",
+    version: str = "",
+    dependencies: list[str] | None = None,
+    storage: str = "",
+    testing_framework: str = "",
+    target_platforms: list[str] | None = None,
+    performance_targets: dict[str, str] | None = None,
+    technical_constraints: list[str] | None = None,
+    architecture_decisions: list[str] | None = None,
+    source_files: list[str] | None = None,
+    test_files: list[str] | None = None,
+    api_contracts: list[dict[str, Any]] | None = None,
+    complexity_notes: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create or update an implementation plan.
+
+    Defines the HOW - technical approach, architecture decisions,
+    and file structure for implementing a feature.
+
+    Args:
+        repo_path: Path to the repository root.
+        feature_id: Feature identifier (must have existing spec).
+        summary: Brief summary of the technical approach.
+        language: Programming language.
+        version: Language/framework version.
+        dependencies: List of dependencies.
+        storage: Storage technology.
+        testing_framework: Testing framework to use.
+        target_platforms: List of target platforms.
+        performance_targets: Dict of performance targets.
+        technical_constraints: List of technical constraints.
+        architecture_decisions: List of architecture decisions.
+        source_files: List of source files to create/modify.
+        test_files: List of test files.
+        api_contracts: List of API contract definitions.
+        complexity_notes: Notes about complexity trade-offs.
+
+    Returns:
+        Dictionary with the saved plan.
+    """
+    return await speckit_tools.speckit_plan(
+        repo_path=repo_path,
+        feature_id=feature_id,
+        summary=summary,
+        language=language,
+        version=version,
+        dependencies=dependencies,
+        storage=storage,
+        testing_framework=testing_framework,
+        target_platforms=target_platforms,
+        performance_targets=performance_targets,
+        technical_constraints=technical_constraints,
+        architecture_decisions=architecture_decisions,
+        source_files=source_files,
+        test_files=test_files,
+        api_contracts=api_contracts,
+        complexity_notes=complexity_notes,
+    )
+
+
+@mcp.tool()
+async def speckit_tasks(
+    repo_path: str,
+    feature_id: str,
+    tasks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Create or update the task list for a feature.
+
+    Generates ordered, actionable task breakdowns from the plan.
+
+    Args:
+        repo_path: Path to the repository root.
+        feature_id: Feature identifier (must have existing spec/plan).
+        tasks: List of task definitions with keys:
+            - id: Task identifier
+            - description: What needs to be done
+            - story_id: Link to user scenario (optional)
+            - phase: Phase number (1=setup, 2=foundation, 3+=stories)
+            - parallel: Whether task can run in parallel
+            - file_paths: Files this task will modify
+            - dependencies: Task IDs this depends on
+            - acceptance_criteria: Criteria for completion
+
+    Returns:
+        Dictionary with the saved task list.
+    """
+    return await speckit_tools.speckit_tasks(
+        repo_path=repo_path,
+        feature_id=feature_id,
+        tasks=tasks,
+    )
+
+
+@mcp.tool()
+async def speckit_implement(
+    repo_path: str,
+    feature_id: str,
+    test_command: str | None = None,
+    max_cost_usd: float = 10.0,
+    timeout_minutes: int = 60,
+) -> dict[str, Any]:
+    """Prepare SpecKit for implementation using ATLAS.
+
+    Converts the SpecKit to a TaskDAG format that can be passed
+    to solve_feature_dag for multi-agent implementation.
+
+    Args:
+        repo_path: Path to the repository root.
+        feature_id: Feature identifier (must have spec, plan, tasks).
+        test_command: Test command to run for validation.
+        max_cost_usd: Maximum cost budget.
+        timeout_minutes: Maximum time in minutes.
+
+    Returns:
+        Dictionary with dag_override for solve_feature_dag or error.
+        Use the suggested_params to call solve_feature_dag.
+    """
+    return await speckit_tools.speckit_implement(
+        repo_path=repo_path,
+        feature_id=feature_id,
+        test_command=test_command,
+        max_cost_usd=max_cost_usd,
+        timeout_minutes=timeout_minutes,
+    )
+
+
+@mcp.tool()
+async def speckit_status(
+    repo_path: str,
+    feature_id: str | None = None,
+) -> dict[str, Any]:
+    """Get the status of a SpecKit or list all features.
+
+    Args:
+        repo_path: Path to the repository root.
+        feature_id: Optional feature ID. If not provided, lists all features.
+
+    Returns:
+        Dictionary with status information.
+    """
+    return await speckit_tools.speckit_status(
+        repo_path=repo_path,
+        feature_id=feature_id,
+    )
+
+
+@mcp.tool()
+async def speckit_export(
+    repo_path: str,
+    feature_id: str,
+) -> dict[str, Any]:
+    """Export a SpecKit as a formatted string for LLM consumption.
+
+    Useful for providing context to AI agents about the feature spec.
+
+    Args:
+        repo_path: Path to the repository root.
+        feature_id: Feature identifier.
+
+    Returns:
+        Dictionary with the exported content.
+    """
+    return await speckit_tools.speckit_export(
+        repo_path=repo_path,
+        feature_id=feature_id,
+    )
 
 
 def main():

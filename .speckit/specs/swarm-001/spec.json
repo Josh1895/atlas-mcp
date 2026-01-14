@@ -1,0 +1,481 @@
+{
+  "feature_id": "SWARM-001",
+  "title": "Atlas Swarm Integration into Agent-MCP",
+  "description": "Embed Atlas Swarm capabilities into Agent-MCP as a first-class subsystem, providing a single entrypoint (run_swarm_consensus tool) that invokes parallel multi-agent generation, clustering, and voting consensus to solve tasks with higher correctness and robustness.",
+  "status": "draft",
+  "created_at": "2025-01-13T00:00:00Z",
+  "updated_at": "2025-01-13T00:00:00Z",
+  "user_scenarios": [
+    {
+      "id": "US-001",
+      "title": "Admin invokes swarm on root task",
+      "description": "An admin user creates a task and invokes swarm consensus to generate a patch solution with multi-agent verification.",
+      "priority": "P1",
+      "given": [
+        "Agent-MCP server is running with SWARM_ENABLED=true",
+        "A task exists in the tasks table with task_id",
+        "Admin has a valid admin token"
+      ],
+      "when": [
+        "Admin calls run_swarm_consensus with task_id and mode=patch",
+        "Swarm generates N candidate patches using diverse prompt styles",
+        "Candidates are clustered by similarity/behavior",
+        "Voting determines winning cluster"
+      ],
+      "then": [
+        "SwarmResult is returned with selected_output containing the patch",
+        "consensus_reached indicates if threshold was met",
+        "Run is persisted in swarm_runs table",
+        "Task notes are updated with swarm summary"
+      ],
+      "edge_cases": [
+        "No consensus reached within timeout - return best-effort",
+        "All candidates invalid - return error with validation details",
+        "Budget exceeded mid-run - stop and return partial result"
+      ]
+    },
+    {
+      "id": "US-002",
+      "title": "Worker agent uses swarm for subtask",
+      "description": "A worker agent creates a child task and invokes swarm to solve a complex sub-problem while working on a larger task.",
+      "priority": "P1",
+      "given": [
+        "Worker agent is assigned to parent task",
+        "Worker has created a child task via create_self_task",
+        "Worker has a valid agent token"
+      ],
+      "when": [
+        "Worker calls run_swarm_consensus with child task_id",
+        "Swarm builds context from task description + parent notes + project context"
+      ],
+      "then": [
+        "SwarmResult includes parent task context in reasoning",
+        "Child task notes updated with swarm result",
+        "Parent task can reference child's swarm output"
+      ],
+      "edge_cases": [
+        "Parent task has no notes - use only child description",
+        "Deep nesting (>3 levels) - cap context depth"
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "Answer mode for research questions",
+      "description": "Admin uses swarm in answer mode to get consensus on a research question with web search and citations.",
+      "priority": "P2",
+      "given": [
+        "SWARM_ANSWER_MODE_ENABLED=true",
+        "enable_web_search=true in tool config"
+      ],
+      "when": [
+        "Admin calls run_swarm_consensus with mode=answer and a description (question)",
+        "Swarm agents perform web research",
+        "Answers are clustered by embedding similarity",
+        "Voting selects consensus answer"
+      ],
+      "then": [
+        "Selected answer includes citations from web sources",
+        "citations_present field indicates if citations were found",
+        "Answer is stored in swarm_outputs with source URLs"
+      ],
+      "edge_cases": [
+        "Web search disabled - answer without citations",
+        "Conflicting sources - flag in warnings",
+        "No consensus on factual claim - lower confidence score"
+      ]
+    },
+    {
+      "id": "US-004",
+      "title": "Swarm with test verification",
+      "description": "Swarm generates patch candidates, runs tests against each, and uses behavioral clustering to prefer passing solutions.",
+      "priority": "P1",
+      "given": [
+        "SWARM_ENABLE_TEST_VERIFICATION=true",
+        "test_command is provided in task or discovered from repo"
+      ],
+      "when": [
+        "Swarm generates patch candidates",
+        "Each candidate is applied in isolated worktree",
+        "Tests are run against each candidate",
+        "Candidates clustered by test outcome"
+      ],
+      "then": [
+        "Passing clusters preferred over failing clusters",
+        "test_result_json stored for each output",
+        "If any cluster passes, consensus only from passing clusters"
+      ],
+      "edge_cases": [
+        "All candidates fail tests - select by similarity consensus",
+        "Tests timeout - mark as failed, not invalid",
+        "Test infrastructure broken - skip verification, log warning"
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "Tool caching across swarm agents",
+      "description": "Expensive tool calls (web search, Context7) are cached and shared across agents in the same run.",
+      "priority": "P2",
+      "given": [
+        "Multiple swarm agents query the same documentation or search terms"
+      ],
+      "when": [
+        "First agent calls web_search with query Q",
+        "Result is cached in tool_cache with TTL",
+        "Second agent calls web_search with same query Q"
+      ],
+      "then": [
+        "Second call returns cached result",
+        "hit_count incremented",
+        "Total tool_calls_count reflects unique calls, not cached hits"
+      ],
+      "edge_cases": [
+        "Cache expired mid-run - re-fetch",
+        "Cache corrupted - invalidate and re-fetch"
+      ]
+    },
+    {
+      "id": "US-006",
+      "title": "Budget enforcement stops runaway costs",
+      "description": "Swarm run is stopped gracefully when budget limits are reached.",
+      "priority": "P1",
+      "given": [
+        "max_cost_usd=1.0 configured",
+        "Current run has spent $0.95"
+      ],
+      "when": [
+        "Next agent generation would exceed budget",
+        "BudgetManager detects overage"
+      ],
+      "then": [
+        "No more agents spawned",
+        "Consensus computed from existing candidates",
+        "status=budget_exceeded in result",
+        "Warning included in response"
+      ],
+      "edge_cases": [
+        "Budget exactly hit - allow completion of current agent",
+        "Budget check race condition - soft overage allowed"
+      ]
+    },
+    {
+      "id": "US-007",
+      "title": "Swarm disabled maintains backward compatibility",
+      "description": "When SWARM_ENABLED=false, all existing Agent-MCP functionality works unchanged.",
+      "priority": "P1",
+      "given": [
+        "SWARM_ENABLED=false in environment"
+      ],
+      "when": [
+        "User calls run_swarm_consensus tool"
+      ],
+      "then": [
+        "Tool returns error: Swarm feature is disabled",
+        "No swarm_runs record created",
+        "All other tools (assign_task, update_task_status, etc.) work normally"
+      ],
+      "edge_cases": [
+        "Flag changed mid-session - check at tool invocation time"
+      ]
+    }
+  ],
+  "functional_requirements": [
+    {
+      "id": "FR-001",
+      "description": "Implement run_swarm_consensus MCP tool that accepts task_id or description, mode (patch/answer), and configuration options",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-002",
+      "description": "Persist all swarm runs in swarm_runs table with full metadata, config, and results",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-003",
+      "description": "Persist individual agent outputs in swarm_outputs table with validation status and cluster assignment",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-004",
+      "description": "Integrate Atlas AgentPoolManager for swarm generation with diverse prompt styles",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-005",
+      "description": "Integrate Atlas SimilarityClustering for patch mode clustering",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-006",
+      "description": "Integrate Atlas VotingManager for first-to-ahead-by-K consensus",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-007",
+      "description": "Implement embedding-based clustering for answer mode using Agent-MCP's embedding model",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-008",
+      "description": "Implement BudgetManager to enforce timeout, cost, token, and tool call limits",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-009",
+      "description": "Implement ToolRouter with permission matrix for enabling/disabling web_search, context7, repo_search, agent_mcp_rag",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-010",
+      "description": "Implement tool_cache table for caching expensive tool outputs with TTL",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-011",
+      "description": "Implement circuit breaker for tool providers to prevent cascading failures",
+      "requirement_type": "SHOULD",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-012",
+      "description": "Implement RepoResolver to support both local project dir and remote clone modes",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-013",
+      "description": "Integrate Atlas PatchApplier and TestRunner for patch verification",
+      "requirement_type": "SHOULD",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-014",
+      "description": "Implement behavioral clustering (cluster_by_test_outcomes) when tests are available",
+      "requirement_type": "SHOULD",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-015",
+      "description": "Write swarm results back to task notes when write_back_to_task=true",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-016",
+      "description": "Write swarm summaries to project_context when write_back_to_project_context=true",
+      "requirement_type": "SHOULD",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-017",
+      "description": "Index selected outputs into RAG when index_into_rag=true",
+      "requirement_type": "MAY",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-018",
+      "description": "Gate all swarm functionality behind SWARM_ENABLED feature flag",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-019",
+      "description": "Implement structured logging with run_id correlation for all swarm operations",
+      "requirement_type": "MUST",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    },
+    {
+      "id": "FR-020",
+      "description": "Implement offline replay harness for deterministic testing of consensus selection",
+      "requirement_type": "SHOULD",
+      "needs_clarification": false,
+      "clarification_notes": ""
+    }
+  ],
+  "data_entities": [
+    {
+      "name": "SwarmRun",
+      "description": "A single execution of the swarm consensus process for a task",
+      "attributes": {
+        "run_id": "TEXT PK - unique identifier (swarm_<uuid>)",
+        "task_id": "TEXT NULL - FK to tasks table",
+        "mode": "TEXT - 'patch' or 'answer'",
+        "status": "TEXT - running/completed/failed/timeout/budget_exceeded",
+        "config_json": "TEXT - serialized SwarmRequest",
+        "started_at": "TEXT - ISO timestamp",
+        "completed_at": "TEXT - ISO timestamp",
+        "consensus_reached": "INTEGER - 0/1",
+        "confidence_score": "REAL - 0.0 to 1.0",
+        "selected_output": "TEXT - winning patch or answer",
+        "selected_variant_id": "TEXT - winning agent or cluster ID",
+        "vote_counts_json": "TEXT - cluster_id to vote count map",
+        "metrics_json": "TEXT - duration, cost, tokens, tool_calls",
+        "errors_json": "TEXT - list of error messages",
+        "warnings_json": "TEXT - list of warnings"
+      },
+      "relationships": [
+        "has_many SwarmAgent",
+        "has_many SwarmOutput",
+        "belongs_to Task (optional)"
+      ]
+    },
+    {
+      "name": "SwarmAgent",
+      "description": "A single micro-agent instance within a swarm run",
+      "attributes": {
+        "run_id": "TEXT - FK to swarm_runs",
+        "swarm_agent_id": "TEXT - agent identifier (agent_0, agent_1, ...)",
+        "prompt_style": "TEXT - SENIOR_ENGINEER, SECURITY_FOCUSED, etc.",
+        "model": "TEXT - model name used",
+        "temperature": "REAL - temperature setting",
+        "status": "TEXT - success/fail/timeout",
+        "started_at": "TEXT - ISO timestamp",
+        "completed_at": "TEXT - ISO timestamp",
+        "tokens_used": "INTEGER",
+        "cost_usd": "REAL",
+        "error": "TEXT - error message if failed"
+      },
+      "relationships": [
+        "belongs_to SwarmRun",
+        "has_one SwarmOutput"
+      ]
+    },
+    {
+      "name": "SwarmOutput",
+      "description": "The output produced by a single swarm agent",
+      "attributes": {
+        "run_id": "TEXT - FK to swarm_runs",
+        "swarm_agent_id": "TEXT - FK to swarm_agents",
+        "output_type": "TEXT - 'patch' or 'answer'",
+        "output_text": "TEXT - raw output content",
+        "explanation": "TEXT - optional reasoning",
+        "is_valid": "INTEGER - 0/1 validation result",
+        "validation_errors_json": "TEXT - list of validation errors",
+        "cluster_id": "TEXT - assigned cluster",
+        "test_result_json": "TEXT - test execution results",
+        "quality_score_json": "TEXT - QualityScorer output"
+      },
+      "relationships": [
+        "belongs_to SwarmRun",
+        "belongs_to SwarmAgent"
+      ]
+    },
+    {
+      "name": "ToolCache",
+      "description": "Cached results from expensive tool calls",
+      "attributes": {
+        "cache_key": "TEXT PK - hash of (tool, args)",
+        "tool_name": "TEXT - web_search, context7, etc.",
+        "value_json": "TEXT - cached response",
+        "created_at": "TEXT - ISO timestamp",
+        "expires_at": "TEXT - ISO timestamp",
+        "hit_count": "INTEGER - number of cache hits"
+      },
+      "relationships": []
+    },
+    {
+      "name": "ToolCall",
+      "description": "Audit record of a tool invocation by a swarm agent",
+      "attributes": {
+        "run_id": "TEXT - FK to swarm_runs",
+        "swarm_agent_id": "TEXT",
+        "tool_name": "TEXT",
+        "args_json": "TEXT - tool arguments",
+        "result_meta_json": "TEXT - result metadata",
+        "status": "TEXT - success/fail/cached",
+        "duration_ms": "INTEGER",
+        "error": "TEXT",
+        "created_at": "TEXT - ISO timestamp"
+      },
+      "relationships": [
+        "belongs_to SwarmRun",
+        "belongs_to SwarmAgent"
+      ]
+    }
+  ],
+  "success_criteria": [
+    {
+      "id": "SC-001",
+      "metric": "Swarm invocation end-to-end success rate",
+      "target": ">= 95% of run_swarm_consensus calls return SwarmResult without internal errors",
+      "measurement_method": "Count errors_json empty / total runs"
+    },
+    {
+      "id": "SC-002",
+      "metric": "Consensus rate on representative eval set",
+      "target": ">= 70% consensus_reached=true",
+      "measurement_method": "Run golden test suite, count consensus_reached"
+    },
+    {
+      "id": "SC-003",
+      "metric": "P50 latency for swarm runs",
+      "target": "<= 90 seconds",
+      "measurement_method": "Median of metrics.duration_ms across runs"
+    },
+    {
+      "id": "SC-004",
+      "metric": "Budget compliance rate",
+      "target": ">= 99% of runs stay under max_cost_usd",
+      "measurement_method": "Count metrics.cost_usd <= config.max_cost_usd / total runs"
+    },
+    {
+      "id": "SC-005",
+      "metric": "Persistence reliability",
+      "target": ">= 99.9% of runs have complete DB records",
+      "measurement_method": "Audit swarm_runs vs swarm_agents vs swarm_outputs counts"
+    },
+    {
+      "id": "SC-006",
+      "metric": "Backward compatibility",
+      "target": "100% of existing Agent-MCP tests pass with SWARM_ENABLED=false",
+      "measurement_method": "Run existing test suite with swarm disabled"
+    }
+  ],
+  "assumptions": [
+    "Python 3.11 is acceptable as minimum version for unified codebase",
+    "SQLite is sufficient for persistence (no need for PostgreSQL in MVP)",
+    "Atlas library can be imported directly without running a separate server",
+    "Gemini API is available for swarm agent LLM calls",
+    "Agent-MCP's existing auth (admin token + agent tokens) is sufficient for swarm access control"
+  ],
+  "constraints": [
+    "Must not break existing Agent-MCP tool schemas or behavior",
+    "Must use Agent-MCP's existing DatabaseWriteQueue for DB writes",
+    "Must be fully functional with web/context7/tests disabled (minimal mode)",
+    "Total implementation should not exceed 5 weeks for MVP"
+  ],
+  "open_questions": [
+    "Should swarm runs be allowed to create their own child tasks automatically?",
+    "What is the retention policy for swarm_outputs (full history vs. only winning)?",
+    "Should answer mode support multi-turn clarification?",
+    "How to handle model provider outages (retry vs. fallback to different provider)?"
+  ]
+}
