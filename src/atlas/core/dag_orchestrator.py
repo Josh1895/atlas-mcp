@@ -48,6 +48,8 @@ class TaskDAGSubmission:
     keywords: list[str] = field(default_factory=list)
     component_names: list[str] = field(default_factory=list)
     test_command: str | None = None
+    review_only: bool = False
+    dag_override: dict | list | str | None = None
 
 
 @dataclass
@@ -212,15 +214,28 @@ class TaskDAGOrchestrator:
                 llm_client=self._maybe_llm(),
                 config=TaskDecomposerConfig(max_tasks=submission.max_tasks),
             )
-            dag = await self.decomposer.decompose(submission.description, scout_report)
+            dag = await self.decomposer.decompose(
+                submission.description,
+                scout_report,
+                keywords=submission.keywords,
+                component_names=submission.component_names,
+                dag_override=submission.dag_override,
+            )
             result.dag = dag
             logger.info(f"Decomposed into {len(dag.tasks)} tasks")
 
             dag_errors = dag.validate()
             if dag_errors:
                 logger.warning(f"DAG validation errors: {dag_errors}")
-                result.status = "failed"
                 result.errors.extend(dag_errors)
+                if submission.review_only:
+                    result.status = "needs_review"
+                    return result
+                result.status = "failed"
+                return result
+
+            if submission.review_only:
+                result.status = "needs_review"
                 return result
 
             topo_order = dag.topological_order()

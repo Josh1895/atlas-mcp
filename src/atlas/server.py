@@ -18,6 +18,7 @@ from atlas.core.dag_orchestrator import (
     TaskDAGSubmission,
     get_dag_orchestrator,
 )
+from atlas.core.task_dag import TaskDAG
 
 # Configure logging
 logging.basicConfig(
@@ -31,6 +32,43 @@ mcp = FastMCP(
     "atlas",
     description="ATLAS: Multi-agent code generation with consensus voting",
 )
+
+
+def _serialize_dag(dag: TaskDAG) -> dict[str, Any]:
+    tasks = []
+    try:
+        ordered_tasks = dag.topological_order()
+    except Exception:
+        ordered_tasks = list(dag.tasks.values())
+
+    for task in ordered_tasks:
+        tasks.append({
+            "id": task.task_id,
+            "title": task.title,
+            "description": task.description,
+            "contract": task.contract,
+            "ownership": {
+                "allowed_files": task.ownership.allowed_files,
+                "allowed_globs": task.ownership.allowed_globs,
+                "allowed_dirs": task.ownership.allowed_dirs,
+                "blocked_globs": task.ownership.blocked_globs,
+            },
+            "oracles": [
+                {
+                    "type": oracle.oracle_type.value,
+                    "command": oracle.command,
+                    "description": oracle.description,
+                    "timeout_seconds": oracle.timeout_seconds,
+                }
+                for oracle in task.oracles
+            ],
+            "inputs": task.inputs,
+            "outputs": task.outputs,
+            "dependencies": task.dependencies,
+            "risk_level": task.risk_level,
+            "priority": task.priority,
+        })
+    return {"tasks": tasks}
 
 
 @mcp.tool()
@@ -131,6 +169,8 @@ async def solve_feature_dag(
     keywords: list[str] | None = None,
     component_names: list[str] | None = None,
     test_command: str | None = None,
+    review_only: bool = False,
+    dag_override: dict | list | str | None = None,
 ) -> dict[str, Any]:
     """Solve a feature request using TaskDAG decomposition and assembly."""
     submission = TaskDAGSubmission(
@@ -144,6 +184,8 @@ async def solve_feature_dag(
         keywords=keywords or [],
         component_names=component_names or [],
         test_command=test_command,
+        review_only=review_only,
+        dag_override=dag_override,
     )
 
     orchestrator = get_dag_orchestrator()
@@ -158,6 +200,14 @@ async def solve_feature_dag(
             "task_id": submission.task_id,
             "status": "timeout",
             "error": f"Task timed out after {timeout_minutes} minutes",
+        }
+
+    if result.status == "needs_review" and result.dag:
+        return {
+            "task_id": result.task_id,
+            "status": result.status,
+            "dag": _serialize_dag(result.dag),
+            "errors": result.errors,
         }
 
     dag_summary = []
