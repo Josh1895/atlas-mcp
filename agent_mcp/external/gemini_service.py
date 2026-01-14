@@ -27,7 +27,7 @@ GEMINI_EMBEDDING_MODEL: str = "text-embedding-004"
 GEMINI_EMBEDDING_DIMENSION: int = 768  # text-embedding-004 outputs 768 dimensions
 
 # Chat model for task analysis (uses same key as swarm agents)
-GEMINI_CHAT_MODEL: str = "gemini-2.0-flash"
+GEMINI_CHAT_MODEL: str = "gemini-3.0-flash"
 
 
 def initialize_gemini_client() -> bool:

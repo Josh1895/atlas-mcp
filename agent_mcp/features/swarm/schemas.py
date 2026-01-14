@@ -28,8 +28,8 @@ class BudgetConfig:
 @dataclass
 class ToolConfig:
     """Tool availability configuration for swarm agents."""
-    enable_web_search: bool = False
-    enable_context7: bool = False
+    enable_web_search: bool = True  # Enabled by default (free)
+    enable_context7: bool = True  # Default True; actually enabled only if CONTEXT7_API_KEY present (via config flag)
     enable_repo_search: bool = True
     enable_agent_mcp_rag: bool = True
     allowed_domains: List[str] = field(default_factory=list)
@@ -66,7 +66,7 @@ class SwarmConfig:
         "JUNIOR_DEVELOPER",
         "CODE_REVIEWER",
     ])
-    model: str = "gemini-2.0-flash"
+    model: str = "gemini-3.0-flash"
     temperature: float = 0.7
 
 

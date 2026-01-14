@@ -182,11 +182,11 @@ EMBEDDING_MODEL: str = "text-embedding-004"
 EMBEDDING_DIMENSION: int = 768  # text-embedding-004 outputs 768 dimensions
 
 # Gemini chat model configuration (uses same GEMINI_API_KEY as swarm agents)
-CHAT_MODEL: str = "gemini-2.0-flash"
-TASK_ANALYSIS_MODEL: str = "gemini-2.0-flash"  # Same model for consistent task analysis
+CHAT_MODEL: str = "gemini-3.0-flash"
+TASK_ANALYSIS_MODEL: str = "gemini-3.0-flash"  # Same model for consistent task analysis
 
 MAX_EMBEDDING_BATCH_SIZE: int = 100
-MAX_CONTEXT_TOKENS: int = 1000000  # Gemini 2.0 Flash has 1M token context
+MAX_CONTEXT_TOKENS: int = 1000000  # Gemini 3.0 Flash has 1M token context
 TASK_ANALYSIS_MAX_TOKENS: int = 1000000
 
 # --- Project Directory Helpers ---
@@ -245,8 +245,14 @@ TASK_PLACEMENT_RAG_TIMEOUT: int = int(
 SWARM_ENABLED: bool = os.getenv("SWARM_ENABLED", "false").lower() == "true"
 SWARM_PATCH_MODE_ENABLED: bool = os.getenv("SWARM_PATCH_MODE_ENABLED", "true").lower() == "true"
 SWARM_ANSWER_MODE_ENABLED: bool = os.getenv("SWARM_ANSWER_MODE_ENABLED", "true").lower() == "true"
-SWARM_ENABLE_WEB: bool = os.getenv("SWARM_ENABLE_WEB", "false").lower() == "true"
-SWARM_ENABLE_CONTEXT7: bool = os.getenv("SWARM_ENABLE_CONTEXT7", "false").lower() == "true"
+SWARM_ENABLE_WEB: bool = os.getenv("SWARM_ENABLE_WEB", "true").lower() == "true"  # Enabled by default (free)
+
+# Context7 API key check - enable Context7 only if API key is present
+CONTEXT7_API_KEY_ENV: Optional[str] = os.environ.get("CONTEXT7_API_KEY")
+SWARM_ENABLE_CONTEXT7: bool = os.getenv(
+    "SWARM_ENABLE_CONTEXT7",
+    "true" if CONTEXT7_API_KEY_ENV else "false"
+).lower() == "true"
 SWARM_ENABLE_TEST_VERIFICATION: bool = os.getenv("SWARM_ENABLE_TEST_VERIFICATION", "false").lower() == "true"
 
 # Swarm Budget Defaults (P-005: Budget Enforcement)

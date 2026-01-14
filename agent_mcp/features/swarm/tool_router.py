@@ -455,21 +455,24 @@ async def web_search_handler(
     num_results: int = 10,
     allowed_domains: Optional[List[str]] = None,
     blocked_domains: Optional[List[str]] = None,
+    fetch_full_content: bool = True,
 ) -> Dict[str, Any]:
     """
     Web search handler using Atlas WebSearchClient.
 
     Searches the web using DuckDuckGo or SerpAPI backend.
-    Results are filtered to trusted coding domains by default.
+    By default, fetches FULL page content (4,000-6,000 chars per result)
+    for rich context instead of just snippets (200-300 chars).
 
     Args:
         query: Search query
         num_results: Maximum number of results
         allowed_domains: Optional list of allowed domains
         blocked_domains: Optional list of blocked domains
+        fetch_full_content: If True (default), fetch full page content for rich context
 
     Returns:
-        Dict with query and results
+        Dict with query and results (with rich content if fetch_full_content=True)
     """
     client = _get_web_search_client()
     if not client:
@@ -480,22 +483,40 @@ async def web_search_handler(
         }
 
     try:
-        # Use allowed domains as site filter if specified
-        site_filter = allowed_domains[0] if allowed_domains else None
+        if fetch_full_content:
+            # Use search_for_code_context for rich content (4,000-6,000 chars per result)
+            results = await client.search_for_code_context(query)
 
-        results = await client.search(
-            query=query,
-            max_results=num_results,
-            site_filter=site_filter,
-            filter_domains=not allowed_domains,  # Use trusted domains unless specific ones given
-        )
+            # Filter blocked domains
+            if blocked_domains:
+                results.results = [
+                    r for r in results.results
+                    if not any(blocked in r.url for blocked in blocked_domains)
+                ]
 
-        # Filter blocked domains
-        if blocked_domains:
-            results.results = [
-                r for r in results.results
-                if not any(blocked in r.url for blocked in blocked_domains)
-            ]
+            # Sort by content length (rich content first) to prioritize full page fetches
+            # Stack Overflow snippets are ~200-300 chars, fetched pages are 4,000-6,000 chars
+            results.results.sort(key=lambda r: len(r.snippet), reverse=True)
+
+            # Limit to requested number
+            results.results = results.results[:num_results]
+        else:
+            # Basic search with short snippets (200-300 chars)
+            site_filter = allowed_domains[0] if allowed_domains else None
+
+            results = await client.search(
+                query=query,
+                max_results=num_results,
+                site_filter=site_filter,
+                filter_domains=not allowed_domains,
+            )
+
+            # Filter blocked domains
+            if blocked_domains:
+                results.results = [
+                    r for r in results.results
+                    if not any(blocked in r.url for blocked in blocked_domains)
+                ]
 
         return {
             "query": query,
@@ -503,12 +524,12 @@ async def web_search_handler(
                 {
                     "title": r.title,
                     "url": r.url,
-                    "snippet": r.snippet,
+                    "snippet": r.snippet,  # Now 4,000-6,000 chars when fetch_full_content=True
                     "source": r.source,
                 }
                 for r in results.results[:num_results]
             ],
-            "error": results.error,
+            "error": results.error if hasattr(results, 'error') else None,
         }
 
     except Exception as e:
