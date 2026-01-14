@@ -468,41 +468,64 @@ class ATLASOrchestrator:
             Tuple of (temp_dir, repo_path, RepoContext) or (None, None, None) on failure
         """
         try:
-            # Create temporary directory for clone (caller must clean up)
+            # Create temporary directory (caller must clean up)
             temp_dir = tempfile.mkdtemp(prefix="atlas_repo_")
             repo_path = Path(temp_dir) / "repo"
 
-            # Clone the repository
-            logger.info(f"Cloning {task.repository_url}")
+            # Check if repository_url is a local path
+            local_path = Path(task.repository_url)
+            is_local = local_path.exists() and local_path.is_dir()
 
-            # Determine clone depth
-            # If base_commit is specified, we need a full clone (or fetch that commit)
-            use_shallow = task.base_commit is None
-            clone_depth = 1 if use_shallow else None
-
-            # Run git clone in executor
-            loop = asyncio.get_running_loop()
-
-            if clone_depth:
+            if is_local:
+                # Local repository - copy to temp directory
+                logger.info(f"Using local repository: {task.repository_url}")
+                loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
                     None,
-                    lambda: git.Repo.clone_from(
-                        task.repository_url,
+                    lambda: shutil.copytree(
+                        local_path,
                         repo_path,
-                        branch=task.branch,
-                        depth=clone_depth,
+                        ignore=shutil.ignore_patterns('.git', '__pycache__', 'node_modules', '.venv', 'venv'),
                     ),
                 )
+                # Initialize as git repo if not already
+                if not (repo_path / ".git").exists():
+                    git.Repo.init(repo_path)
+                    repo = git.Repo(repo_path)
+                    repo.index.add("*")
+                    repo.index.commit("ATLAS: Initial commit from local")
             else:
-                # Full clone for base_commit support
-                await loop.run_in_executor(
-                    None,
-                    lambda: git.Repo.clone_from(
-                        task.repository_url,
-                        repo_path,
-                        branch=task.branch,
-                    ),
-                )
+                # Remote repository - clone it
+                logger.info(f"Cloning {task.repository_url}")
+
+                # Determine clone depth
+                # If base_commit is specified, we need a full clone (or fetch that commit)
+                use_shallow = task.base_commit is None
+                clone_depth = 1 if use_shallow else None
+
+                # Run git clone in executor
+                loop = asyncio.get_running_loop()
+
+                if clone_depth:
+                    await loop.run_in_executor(
+                        None,
+                        lambda: git.Repo.clone_from(
+                            task.repository_url,
+                            repo_path,
+                            branch=task.branch,
+                            depth=clone_depth,
+                        ),
+                    )
+                else:
+                    # Full clone for base_commit support
+                    await loop.run_in_executor(
+                        None,
+                        lambda: git.Repo.clone_from(
+                            task.repository_url,
+                            repo_path,
+                            branch=task.branch,
+                        ),
+                    )
 
             # If a specific commit is requested, check it out
             if task.base_commit:

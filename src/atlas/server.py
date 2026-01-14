@@ -74,7 +74,7 @@ def _serialize_dag(dag: TaskDAG) -> dict[str, Any]:
 
 @mcp.tool()
 async def solve_issue(
-    repo_url: str,
+    repo_path: str,
     issue_description: str,
     branch: str = "main",
     base_commit: str | None = None,
@@ -83,18 +83,20 @@ async def solve_issue(
     max_cost_usd: float = 2.0,
     timeout_minutes: int = 15,
 ) -> dict[str, Any]:
-    """Solve a GitHub issue using multi-agent consensus.
+    """Solve an issue using multi-agent consensus.
 
     Generates patches using multiple diverse AI agents, validates them,
     and uses voting to select the best solution.
 
+    Works with both local paths and remote git URLs.
+
     Args:
-        repo_url: URL of the git repository (e.g., https://github.com/user/repo)
+        repo_path: Local folder path (e.g., "./my-project") OR git URL
         issue_description: Natural language description of the issue to fix
         branch: Target branch (default: main)
         base_commit: Specific commit to base the fix on (optional)
         relevant_files: List of files likely to need changes (optional)
-    test_command: Command to run tests (optional, used as primary oracle)
+        test_command: Command to run tests (optional, used as primary oracle)
         max_cost_usd: Maximum cost budget in USD (default: 2.0)
         timeout_minutes: Maximum time in minutes (default: 15)
 
@@ -116,7 +118,7 @@ async def solve_issue(
     # Create task submission
     task = TaskSubmission(
         description=issue_description,
-        repository_url=repo_url,
+        repository_url=repo_path,
         branch=branch,
         base_commit=base_commit,
         relevant_files=relevant_files or [],
@@ -128,7 +130,7 @@ async def solve_issue(
         max_samples=config.max_samples * 3,
     )
 
-    logger.info(f"Starting task {task.task_id} for {repo_url}")
+    logger.info(f"Starting task {task.task_id} for {repo_path}")
 
     # Get orchestrator and solve
     orchestrator = get_orchestrator()
@@ -159,8 +161,357 @@ async def solve_issue(
 
 
 @mcp.tool()
+async def solve_file(
+    file_path: str,
+    issue_description: str,
+    additional_files: list[str] | None = None,
+    max_cost_usd: float = 1.0,
+    timeout_minutes: int = 5,
+) -> dict[str, Any]:
+    """Fix issues in a single file or small set of files.
+
+    Simpler than solve_issue - no git repo required. Just pass a file path
+    and describe what needs to be fixed. Works on any local file.
+
+    Args:
+        file_path: Path to the main file to fix (e.g., "./my_script.py")
+        issue_description: What needs to be fixed or changed
+        additional_files: Other files to include as context (optional)
+        max_cost_usd: Maximum cost budget (default: 1.0)
+        timeout_minutes: Maximum time (default: 5)
+
+    Returns:
+        Dictionary with:
+        - status: "completed" or "failed"
+        - patch: Unified diff patch for the file(s)
+        - explanation: What was changed and why
+        - cost_usd: Total cost
+    """
+    from pathlib import Path as FilePath
+    from atlas.agents.micro_agent import MicroAgent, AgentContext
+    from atlas.agents.prompt_styles import ALL_STYLES
+    from atlas.core.task import TaskSubmission, Solution
+
+    config = get_config()
+
+    # Validate config
+    errors = config.validate()
+    if errors:
+        return {
+            "status": "error",
+            "error": "Configuration error",
+            "details": errors,
+        }
+
+    # Read the main file
+    main_path = FilePath(file_path)
+    if not main_path.exists():
+        return {
+            "status": "error",
+            "error": f"File not found: {file_path}",
+        }
+
+    try:
+        main_content = main_path.read_text(encoding='utf-8')
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": f"Could not read file: {e}",
+        }
+
+    # Build file context
+    file_context = f"## File: {main_path.name}\n```\n{main_content}\n```\n"
+
+    # Read additional files if provided
+    if additional_files:
+        for add_file in additional_files:
+            add_path = FilePath(add_file)
+            if add_path.exists():
+                try:
+                    add_content = add_path.read_text(encoding='utf-8')
+                    file_context += f"\n## File: {add_path.name}\n```\n{add_content}\n```\n"
+                except:
+                    pass
+
+    # Create a minimal task
+    task = TaskSubmission(
+        description=f"""Fix the following issue in {main_path.name}:
+
+{issue_description}
+
+Generate a unified diff patch that fixes the issue.""",
+        repository_url="local",
+        branch="main",
+        relevant_files=[str(main_path)],
+        max_cost_usd=max_cost_usd,
+        timeout_minutes=timeout_minutes,
+        initial_samples=3,
+        max_samples=3,
+        voting_k=2,
+    )
+
+    # Create context for agents
+    context = AgentContext(
+        task=task,
+        repository_content=file_context,
+    )
+
+    # Run 3 diverse agents
+    agents = [
+        MicroAgent(agent_id=f"agent_{i}", prompt_style=ALL_STYLES[i % len(ALL_STYLES)], config=config)
+        for i in range(3)
+    ]
+
+    logger.info(f"Running 3 agents on {file_path}")
+
+    try:
+        # Run agents in parallel
+        solutions = await asyncio.wait_for(
+            asyncio.gather(*[agent.generate(context) for agent in agents], return_exceptions=True),
+            timeout=timeout_minutes * 60,
+        )
+
+        # Filter valid solutions
+        valid_solutions = [
+            s for s in solutions
+            if isinstance(s, Solution) and s.is_valid and s.patch
+        ]
+
+        if not valid_solutions:
+            return {
+                "status": "failed",
+                "error": "No valid patches generated",
+                "agent_errors": [str(s) if isinstance(s, Exception) else s.validation_errors for s in solutions],
+            }
+
+        # Pick the best solution (longest patch as simple heuristic, or first valid)
+        best = max(valid_solutions, key=lambda s: len(s.patch))
+
+        total_cost = sum(s.cost for s in solutions if isinstance(s, Solution))
+
+        return {
+            "status": "completed",
+            "file": str(main_path),
+            "patch": best.patch,
+            "explanation": best.explanation,
+            "cost_usd": total_cost,
+            "agents_run": len(solutions),
+            "valid_patches": len(valid_solutions),
+        }
+
+    except asyncio.TimeoutError:
+        return {
+            "status": "timeout",
+            "error": f"Timed out after {timeout_minutes} minutes",
+        }
+
+    except Exception as e:
+        logger.exception("solve_file failed")
+        return {
+            "status": "error",
+            "error": str(e),
+        }
+
+
+@mcp.tool()
+async def solve_folder(
+    folder_path: str,
+    issue_description: str,
+    file_patterns: list[str] | None = None,
+    max_files: int = 10,
+    max_cost_usd: float = 2.0,
+    timeout_minutes: int = 10,
+) -> dict[str, Any]:
+    """Fix issues in a local folder of files.
+
+    Works on any local folder - no git repo required. Automatically finds
+    relevant files based on patterns or common extensions.
+
+    Args:
+        folder_path: Path to the folder (e.g., "./src" or "C:/projects/myapp")
+        issue_description: What needs to be fixed or changed
+        file_patterns: Glob patterns to match files (e.g., ["*.py", "*.js"])
+                      Default: common code extensions
+        max_files: Maximum number of files to include (default: 10)
+        max_cost_usd: Maximum cost budget (default: 2.0)
+        timeout_minutes: Maximum time (default: 10)
+
+    Returns:
+        Dictionary with:
+        - status: "completed" or "failed"
+        - patch: Unified diff patch for all files
+        - files_analyzed: List of files that were included
+        - cost_usd: Total cost
+    """
+    import glob
+    from pathlib import Path as FilePath
+    from atlas.agents.micro_agent import MicroAgent, AgentContext
+    from atlas.agents.prompt_styles import ALL_STYLES
+    from atlas.core.task import TaskSubmission, Solution
+
+    config = get_config()
+
+    # Validate config
+    errors = config.validate()
+    if errors:
+        return {
+            "status": "error",
+            "error": "Configuration error",
+            "details": errors,
+        }
+
+    # Check folder exists
+    folder = FilePath(folder_path)
+    if not folder.exists() or not folder.is_dir():
+        return {
+            "status": "error",
+            "error": f"Folder not found: {folder_path}",
+        }
+
+    # Default file patterns for common code files
+    if not file_patterns:
+        file_patterns = [
+            "*.py", "*.js", "*.ts", "*.jsx", "*.tsx",
+            "*.java", "*.go", "*.rs", "*.cpp", "*.c", "*.h",
+            "*.cs", "*.rb", "*.php", "*.swift", "*.kt",
+        ]
+
+    # Find matching files
+    all_files = []
+    for pattern in file_patterns:
+        # Search recursively
+        matches = list(folder.rglob(pattern))
+        all_files.extend(matches)
+
+    # Filter out common non-source directories
+    excluded_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'dist', 'build', '.next'}
+    filtered_files = [
+        f for f in all_files
+        if not any(excl in f.parts for excl in excluded_dirs)
+    ]
+
+    # Sort by size (smaller files first) and limit
+    filtered_files.sort(key=lambda f: f.stat().st_size)
+    selected_files = filtered_files[:max_files]
+
+    if not selected_files:
+        return {
+            "status": "error",
+            "error": f"No matching files found in {folder_path} with patterns {file_patterns}",
+        }
+
+    # Read file contents
+    file_context = ""
+    files_analyzed = []
+    total_size = 0
+    max_total_size = 100000  # 100KB limit
+
+    for file_path in selected_files:
+        try:
+            content = file_path.read_text(encoding='utf-8')
+            if total_size + len(content) > max_total_size:
+                break
+            rel_path = file_path.relative_to(folder)
+            file_context += f"\n## File: {rel_path}\n```\n{content}\n```\n"
+            files_analyzed.append(str(rel_path))
+            total_size += len(content)
+        except Exception:
+            pass  # Skip files that can't be read
+
+    if not files_analyzed:
+        return {
+            "status": "error",
+            "error": "Could not read any files",
+        }
+
+    logger.info(f"Analyzing {len(files_analyzed)} files from {folder_path}")
+
+    # Create task
+    task = TaskSubmission(
+        description=f"""Fix the following issue in the codebase:
+
+{issue_description}
+
+Files included:
+{chr(10).join('- ' + f for f in files_analyzed)}
+
+Generate a unified diff patch that fixes the issue.""",
+        repository_url="local",
+        branch="main",
+        relevant_files=files_analyzed,
+        max_cost_usd=max_cost_usd,
+        timeout_minutes=timeout_minutes,
+        initial_samples=3,
+        max_samples=3,
+        voting_k=2,
+    )
+
+    # Create context for agents
+    context = AgentContext(
+        task=task,
+        repository_content=file_context,
+    )
+
+    # Run 3 diverse agents
+    agents = [
+        MicroAgent(agent_id=f"agent_{i}", prompt_style=ALL_STYLES[i % len(ALL_STYLES)], config=config)
+        for i in range(3)
+    ]
+
+    try:
+        # Run agents in parallel
+        solutions = await asyncio.wait_for(
+            asyncio.gather(*[agent.generate(context) for agent in agents], return_exceptions=True),
+            timeout=timeout_minutes * 60,
+        )
+
+        # Filter valid solutions
+        valid_solutions = [
+            s for s in solutions
+            if isinstance(s, Solution) and s.is_valid and s.patch
+        ]
+
+        if not valid_solutions:
+            return {
+                "status": "failed",
+                "error": "No valid patches generated",
+                "files_analyzed": files_analyzed,
+                "agent_errors": [str(s) if isinstance(s, Exception) else s.validation_errors for s in solutions],
+            }
+
+        # Pick the best solution
+        best = max(valid_solutions, key=lambda s: len(s.patch))
+        total_cost = sum(s.cost for s in solutions if isinstance(s, Solution))
+
+        return {
+            "status": "completed",
+            "folder": str(folder),
+            "patch": best.patch,
+            "explanation": best.explanation,
+            "files_analyzed": files_analyzed,
+            "cost_usd": total_cost,
+            "agents_run": len(solutions),
+            "valid_patches": len(valid_solutions),
+        }
+
+    except asyncio.TimeoutError:
+        return {
+            "status": "timeout",
+            "error": f"Timed out after {timeout_minutes} minutes",
+            "files_analyzed": files_analyzed,
+        }
+
+    except Exception as e:
+        logger.exception("solve_folder failed")
+        return {
+            "status": "error",
+            "error": str(e),
+        }
+
+
+@mcp.tool()
 async def solve_feature_dag(
-    repo_url: str,
+    repo_path: str,
     description: str,
     branch: str = "main",
     base_commit: str | None = None,
@@ -173,10 +524,33 @@ async def solve_feature_dag(
     review_only: bool = False,
     dag_override: dict | list | str | None = None,
 ) -> dict[str, Any]:
-    """Solve a feature request using TaskDAG decomposition and assembly."""
+    """Solve a feature request using TaskDAG decomposition and assembly.
+
+    Breaks complex features into smaller tasks, solves each with multi-agent
+    consensus, then assembles the final patch.
+
+    Works with both local paths and remote git URLs.
+
+    Args:
+        repo_path: Local folder path (e.g., "./my-project") OR git URL
+        description: Description of the feature to implement
+        branch: Target branch (default: main)
+        base_commit: Specific commit to base changes on (optional)
+        max_tasks: Maximum number of sub-tasks to create (default: 12)
+        max_cost_usd: Maximum cost budget in USD (default: 10.0)
+        timeout_minutes: Maximum time in minutes (default: 60)
+        keywords: Keywords to help identify relevant code (optional)
+        component_names: Component names to focus on (optional)
+        test_command: Command to run tests (optional)
+        review_only: If True, only generate DAG without implementing (default: False)
+        dag_override: Override the auto-generated DAG (optional)
+
+    Returns:
+        Dictionary with final_patch, cost, and task results.
+    """
     submission = TaskDAGSubmission(
         description=description,
-        repository_url=repo_url,
+        repository_url=repo_path,
         branch=branch,
         base_commit=base_commit,
         max_tasks=max_tasks,

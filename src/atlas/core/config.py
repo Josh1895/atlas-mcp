@@ -30,6 +30,12 @@ class Config:
     max_samples: int = 30
     initial_samples: int = 10  # 2 of each of 5 prompt styles
 
+    # Rate limiting - prevents 429 errors from parallel requests
+    max_concurrent_requests: int = 3  # Max simultaneous API calls
+    request_delay_seconds: float = 0.5  # Delay between starting requests
+    retry_delay_base: float = 2.0  # Base delay for retries (exponential backoff)
+    max_retries: int = 5  # Max retries for rate-limited requests
+
     # Cost and timeout limits
     max_cost_usd: float = 2.0
     timeout_minutes: int = 15
@@ -71,6 +77,11 @@ class Config:
             voting_k=int(os.getenv("ATLAS_VOTING_K", "3")),
             max_samples=int(os.getenv("ATLAS_MAX_SAMPLES", "30")),
             initial_samples=int(os.getenv("ATLAS_INITIAL_SAMPLES", "10")),
+            # Rate limiting
+            max_concurrent_requests=int(os.getenv("ATLAS_MAX_CONCURRENT_REQUESTS", "3")),
+            request_delay_seconds=float(os.getenv("ATLAS_REQUEST_DELAY_SECONDS", "0.5")),
+            retry_delay_base=float(os.getenv("ATLAS_RETRY_DELAY_BASE", "2.0")),
+            max_retries=int(os.getenv("ATLAS_MAX_RETRIES", "5")),
             # Cost and timeout limits
             max_cost_usd=float(os.getenv("ATLAS_MAX_COST_USD", "2.0")),
             timeout_minutes=int(os.getenv("ATLAS_TIMEOUT_MINUTES", "15")),

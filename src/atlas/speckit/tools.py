@@ -479,7 +479,7 @@ async def speckit_implement(
         "dag_override": dag_override,
         "task_count": len(dag_override.get("tasks", [])),
         "suggested_params": {
-            "repo_url": repo_path,
+            "repo_path": repo_path,
             "description": speckit.specification.description if speckit.specification else "",
             "test_command": test_command,
             "max_cost_usd": max_cost_usd,

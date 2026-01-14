@@ -79,6 +79,12 @@ class TaskDecomposerConfig:
     num_temperatures: int = 3
     temperatures: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.8])
 
+    # Rate limiting - prevents 429 errors from parallel requests
+    max_concurrent_requests: int = 3  # Max simultaneous API calls
+    request_delay_seconds: float = 0.5  # Delay between starting requests
+    retry_delay_base: float = 2.0  # Base delay for retries (exponential backoff)
+    max_retries: int = 5  # Max retries for rate-limited requests
+
     # Ensemble merging (T-001)
     enable_ensemble_merge: bool = True
     cluster_similarity_threshold: float = 0.6
@@ -200,9 +206,14 @@ class TaskDecomposer:
         keywords: list[str],
         component_names: list[str],
     ) -> list[TaskDecompositionCandidate]:
-        """T-002: Generate 3×3 variant matrix (personas × temperatures) in parallel."""
+        """T-002: Generate 3×3 variant matrix (personas × temperatures) with rate limiting."""
         personas = list(DECOMPOSITION_PERSONAS.items())[:self.config.num_personas]
         temperatures = self.config.temperatures[:self.config.num_temperatures]
+
+        # Rate limiting: semaphore to limit concurrent API calls
+        semaphore = asyncio.Semaphore(self.config.max_concurrent_requests)
+        request_count = 0
+        request_lock = asyncio.Lock()
 
         async def generate_variant(
             persona_name: str,
@@ -211,56 +222,72 @@ class TaskDecomposer:
             variant_idx: int,
         ) -> TaskDecompositionCandidate:
             """Generate a single variant with specific persona and temperature."""
+            nonlocal request_count
+
             source = f"{persona_name}_{temperature}"
             system_prompt = (
                 f"You are a senior staff engineer decomposing work into verified tasks. "
                 f"{persona_prompt}"
             )
 
-            try:
-                result = await self.llm_client.generate_with_retry(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    temperature=temperature,
-                    max_tokens=4000,
-                )
+            # Acquire semaphore to limit concurrent requests
+            async with semaphore:
+                # Add staggered delay to prevent burst requests
+                async with request_lock:
+                    current_request = request_count
+                    request_count += 1
 
-                data = self._parse_json(result.text)
-                if not data:
+                if current_request > 0:
+                    delay = self.config.request_delay_seconds * current_request
+                    logger.debug("Variant %s waiting %.1fs before request", source, delay)
+                    await asyncio.sleep(delay)
+
+                try:
+                    result = await self.llm_client.generate_with_retry(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        temperature=temperature,
+                        max_tokens=4000,
+                        max_retries=self.config.max_retries,
+                        retry_delay=self.config.retry_delay_base,
+                    )
+
+                    data = self._parse_json(result.text)
+                    if not data:
+                        return TaskDecompositionCandidate(
+                            dag=self._fallback_dag(description, repo_report),
+                            source=source,
+                            errors=["Failed to parse decomposition JSON"],
+                            persona=persona_name,
+                            temperature=temperature,
+                        )
+
+                    dag = self._build_dag_from_json(data)
+                    coverage_score, coverage_missing = self._coverage_score(
+                        dag, repo_report, keywords, component_names
+                    )
+                    errors = self._validate_candidate(dag, coverage_score, coverage_missing)
+
+                    return TaskDecompositionCandidate(
+                        dag=dag,
+                        source=source,
+                        errors=errors,
+                        coverage_score=coverage_score,
+                        coverage_missing=coverage_missing,
+                        persona=persona_name,
+                        temperature=temperature,
+                    )
+                except Exception as exc:
+                    logger.warning("Variant %s failed: %s", source, exc)
                     return TaskDecompositionCandidate(
                         dag=self._fallback_dag(description, repo_report),
                         source=source,
-                        errors=["Failed to parse decomposition JSON"],
+                        errors=[f"Generation failed: {exc}"],
                         persona=persona_name,
                         temperature=temperature,
                     )
 
-                dag = self._build_dag_from_json(data)
-                coverage_score, coverage_missing = self._coverage_score(
-                    dag, repo_report, keywords, component_names
-                )
-                errors = self._validate_candidate(dag, coverage_score, coverage_missing)
-
-                return TaskDecompositionCandidate(
-                    dag=dag,
-                    source=source,
-                    errors=errors,
-                    coverage_score=coverage_score,
-                    coverage_missing=coverage_missing,
-                    persona=persona_name,
-                    temperature=temperature,
-                )
-            except Exception as exc:
-                logger.warning("Variant %s failed: %s", source, exc)
-                return TaskDecompositionCandidate(
-                    dag=self._fallback_dag(description, repo_report),
-                    source=source,
-                    errors=[f"Generation failed: {exc}"],
-                    persona=persona_name,
-                    temperature=temperature,
-                )
-
-        # Build all combinations and run in parallel
+        # Build all combinations and run with rate limiting
         tasks = []
         variant_idx = 0
         for persona_name, persona_prompt in personas:
@@ -270,6 +297,12 @@ class TaskDecomposer:
                 )
                 variant_idx += 1
 
+        logger.info(
+            "Starting %d variant generations (max %d concurrent, %.1fs delay)",
+            len(tasks),
+            self.config.max_concurrent_requests,
+            self.config.request_delay_seconds,
+        )
         candidates = await asyncio.gather(*tasks)
         logger.info(
             "Generated %d variants: %d valid, %d with errors",

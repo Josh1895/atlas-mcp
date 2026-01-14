@@ -190,11 +190,32 @@ class GeminiClient:
                 )
             except Exception as e:
                 last_error = e
-                logger.warning(
-                    f"Generation attempt {attempt + 1}/{max_retries} failed: {e}"
-                )
-                if attempt < max_retries - 1:
+                error_str = str(e).lower()
+
+                # Check for rate limit or server overload errors
+                is_rate_limit = any(code in error_str for code in ["429", "rate", "quota", "resource_exhausted"])
+                is_server_error = any(code in error_str for code in ["503", "500", "502", "504", "unavailable", "overloaded"])
+
+                if is_rate_limit:
+                    # Longer backoff for rate limits (start at 5x base delay)
+                    delay = retry_delay * 5 * (2 ** attempt)
+                    logger.warning(
+                        f"Rate limit hit (attempt {attempt + 1}/{max_retries}), waiting {delay:.1f}s: {e}"
+                    )
+                elif is_server_error:
+                    # Server errors: moderate backoff (start at 3x base delay)
+                    delay = retry_delay * 3 * (2 ** attempt)
+                    logger.warning(
+                        f"Server error (attempt {attempt + 1}/{max_retries}), waiting {delay:.1f}s: {e}"
+                    )
+                else:
+                    # Standard exponential backoff for other errors
                     delay = retry_delay * (2 ** attempt)
+                    logger.warning(
+                        f"Generation attempt {attempt + 1}/{max_retries} failed: {e}"
+                    )
+
+                if attempt < max_retries - 1:
                     await asyncio.sleep(delay)
 
         raise last_error or Exception("Generation failed after all retries")

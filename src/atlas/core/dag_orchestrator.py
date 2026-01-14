@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -608,31 +609,55 @@ class TaskDAGOrchestrator:
         temp_dir = tempfile.mkdtemp(prefix="atlas_repo_")
         repo_path = Path(temp_dir) / "repo"
 
-        loop = asyncio.get_running_loop()
-        use_shallow = submission.base_commit is None
-        if use_shallow:
-            await loop.run_in_executor(
-                None,
-                lambda: git.Repo.clone_from(
-                    submission.repository_url,
-                    repo_path,
-                    branch=submission.branch,
-                    depth=1,
-                ),
-            )
-        else:
-            await loop.run_in_executor(
-                None,
-                lambda: git.Repo.clone_from(
-                    submission.repository_url,
-                    repo_path,
-                    branch=submission.branch,
-                ),
-            )
+        # Check if repository_url is a local path
+        local_path = Path(submission.repository_url)
+        is_local = local_path.exists() and local_path.is_dir()
 
-        if submission.base_commit:
-            repo = git.Repo(repo_path)
-            repo.git.checkout(submission.base_commit)
+        loop = asyncio.get_running_loop()
+
+        if is_local:
+            # Local repository - copy to temp directory
+            logger.info(f"Using local repository: {submission.repository_url}")
+            await loop.run_in_executor(
+                None,
+                lambda: shutil.copytree(
+                    local_path,
+                    repo_path,
+                    ignore=shutil.ignore_patterns('.git', '__pycache__', 'node_modules', '.venv', 'venv'),
+                ),
+            )
+            # Initialize as git repo if not already
+            if not (repo_path / ".git").exists():
+                git.Repo.init(repo_path)
+                repo = git.Repo(repo_path)
+                repo.index.add("*")
+                repo.index.commit("ATLAS: Initial commit from local")
+        else:
+            # Remote repository - clone it
+            use_shallow = submission.base_commit is None
+            if use_shallow:
+                await loop.run_in_executor(
+                    None,
+                    lambda: git.Repo.clone_from(
+                        submission.repository_url,
+                        repo_path,
+                        branch=submission.branch,
+                        depth=1,
+                    ),
+                )
+            else:
+                await loop.run_in_executor(
+                    None,
+                    lambda: git.Repo.clone_from(
+                        submission.repository_url,
+                        repo_path,
+                        branch=submission.branch,
+                    ),
+                )
+
+            if submission.base_commit:
+                repo = git.Repo(repo_path)
+                repo.git.checkout(submission.base_commit)
 
         return repo_path
 
