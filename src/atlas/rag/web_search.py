@@ -303,7 +303,7 @@ class WebSearchClient:
 
         try:
             # Run synchronous DDGS in thread pool to not block async
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             ddg_results = await loop.run_in_executor(
                 None,
                 lambda: list(DDGS().text(query, max_results=max_results * 2))

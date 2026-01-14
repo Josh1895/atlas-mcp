@@ -7,7 +7,7 @@
 - Multi-agent code generation with diverse prompt styles
 - First-to-ahead-by-K consensus voting for reliability
 - Context7 integration for up-to-date documentation
-- Gemini 2.5 Flash as the primary LLM
+- Gemini 3 Flash as the primary LLM
 - Static analysis and patch validation
 - Early stopping when consensus is reached
 

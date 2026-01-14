@@ -6,6 +6,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Default model - Gemini 3 Flash (latest, recommended for production)
+# Override with ATLAS_MODEL environment variable
+DEFAULT_MODEL = os.getenv("ATLAS_MODEL", "gemini-3-flash-preview")
+
 
 @dataclass
 class Config:
@@ -60,7 +64,7 @@ class Config:
             context7_api_key=os.getenv("CONTEXT7_API_KEY", ""),
             serpapi_api_key=os.getenv("SERPAPI_API_KEY", ""),
             # Model configuration
-            model=os.getenv("ATLAS_MODEL", "gemini-3-flash"),
+            model=os.getenv("ATLAS_MODEL", "gemini-3-flash-preview"),
             temperature=float(os.getenv("ATLAS_TEMPERATURE", "0.7")),
             max_output_tokens=int(os.getenv("ATLAS_MAX_OUTPUT_TOKENS", "8192")),
             # Voting parameters

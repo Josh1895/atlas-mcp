@@ -173,7 +173,7 @@ class AtlasAdapter:
         task = TaskSubmission(
             task_id=f"swarm_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
             description=task_description,
-            repo_url="local",  # Local mode
+            repository_url="local",  # Local mode
         )
 
         # Create agent context
@@ -217,7 +217,7 @@ class AtlasAdapter:
         task = TaskSubmission(
             task_id=f"answer_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
             description=question,
-            repo_url="",
+            repository_url="",
         )
 
         context_obj = AgentContext(

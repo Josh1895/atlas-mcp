@@ -46,6 +46,9 @@ htmlcov/
 # ATLAS work directory
 .atlas/
 
+# Agent MCP state directory
+.agent/
+
 # OS
 .DS_Store
 Thumbs.db

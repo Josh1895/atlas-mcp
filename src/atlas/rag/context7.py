@@ -74,6 +74,11 @@ class Context7Client:
         """Fallback: Call Context7 via HTTP REST API v2 if MCP fails."""
         import httpx
 
+        # Skip if no API key configured
+        if not self.config.context7_api_key:
+            logger.debug("Context7 API key not configured, skipping")
+            return None
+
         base_url = "https://context7.com/api/v2"
 
         # Map MCP tool names to REST API v2 endpoints

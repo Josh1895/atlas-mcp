@@ -74,7 +74,7 @@ class GeminiClient:
         )
 
         # Run in executor to avoid blocking
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None,
             lambda: self.client.models.generate_content(
@@ -138,7 +138,7 @@ class GeminiClient:
         )
 
         # Run in executor to get the stream
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         response_stream = await loop.run_in_executor(
             None,
             lambda: self.client.models.generate_content_stream(

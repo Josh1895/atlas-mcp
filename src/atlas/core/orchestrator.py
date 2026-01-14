@@ -481,7 +481,7 @@ class ATLASOrchestrator:
             clone_depth = 1 if use_shallow else None
 
             # Run git clone in executor
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             if clone_depth:
                 await loop.run_in_executor(

@@ -422,7 +422,7 @@ class AgenticGeminiClient:
         total_output = 0
         tool_calls = []
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         for iteration in range(max_iterations):
             # Call Gemini with retry logic for 503 errors

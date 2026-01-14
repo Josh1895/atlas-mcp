@@ -270,7 +270,7 @@ async def main():
                 prompt_style=result["style"],
                 patch=result["patch"],
                 explanation=result["response"][:500],
-                model="gemini-2.5-flash",
+                model="gemini-3-flash-preview",
                 tokens_used=result.get("input_tokens", 0) + result.get("output_tokens", 0),
                 cost=result.get("cost", 0.0),
                 rag_sources=[tc["name"] for tc in result["tool_calls"]],

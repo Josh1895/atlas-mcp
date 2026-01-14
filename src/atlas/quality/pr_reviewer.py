@@ -58,7 +58,7 @@ class LLMPRReviewer:
     def __init__(
         self,
         llm_client: Any,
-        model: str = "gemini-2.5-flash",  # Could use a different model
+        model: str = "gemini-3-flash-preview",  # Could use a different model
     ):
         """Initialize the PR reviewer.
 
@@ -206,7 +206,7 @@ class TournamentReviewer:
     def __init__(
         self,
         llm_client: Any,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3-flash-preview",
     ):
         """Initialize the tournament reviewer.
 

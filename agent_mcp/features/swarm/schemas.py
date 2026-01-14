@@ -66,7 +66,7 @@ class SwarmConfig:
         "JUNIOR_DEVELOPER",
         "CODE_REVIEWER",
     ])
-    model: str = "gemini-3.0-flash"
+    model: str = "gemini-3-flash-preview"
     temperature: float = 0.7
 
 

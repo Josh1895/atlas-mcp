@@ -608,7 +608,7 @@ class TaskDAGOrchestrator:
         temp_dir = tempfile.mkdtemp(prefix="atlas_repo_")
         repo_path = Path(temp_dir) / "repo"
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         use_shallow = submission.base_commit is None
         if use_shallow:
             await loop.run_in_executor(

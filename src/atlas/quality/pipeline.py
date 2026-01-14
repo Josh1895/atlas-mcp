@@ -43,7 +43,7 @@ class QualitySelectionConfig:
     enable_llm_review: bool = True
     enable_tournament: bool = True
     max_patches_for_tournament: int = 6  # Limit to reduce API calls
-    review_model: str = "gemini-2.5-flash"
+    review_model: str = "gemini-3-flash-preview"
 
     # Selection weights
     style_weight: float = 0.20

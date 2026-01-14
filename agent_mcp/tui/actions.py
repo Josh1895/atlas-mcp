@@ -203,11 +203,8 @@ class TUIActions:
             return False
     
     def run_async(self, coro):
-        """Helper to run async functions in sync context."""
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        return loop.run_until_complete(coro)
+        """Helper to run async functions in sync context.
+
+        Uses asyncio.run() which properly manages loop lifecycle (Python 3.7+).
+        """
+        return asyncio.run(coro)

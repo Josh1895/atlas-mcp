@@ -182,11 +182,11 @@ EMBEDDING_MODEL: str = "text-embedding-004"
 EMBEDDING_DIMENSION: int = 768  # text-embedding-004 outputs 768 dimensions
 
 # Gemini chat model configuration (uses same GEMINI_API_KEY as swarm agents)
-CHAT_MODEL: str = "gemini-3.0-flash"
-TASK_ANALYSIS_MODEL: str = "gemini-3.0-flash"  # Same model for consistent task analysis
+CHAT_MODEL: str = "gemini-3-flash-preview"
+TASK_ANALYSIS_MODEL: str = "gemini-3-flash-preview"  # Same model for consistent task analysis
 
 MAX_EMBEDDING_BATCH_SIZE: int = 100
-MAX_CONTEXT_TOKENS: int = 1000000  # Gemini 3.0 Flash has 1M token context
+MAX_CONTEXT_TOKENS: int = 1000000  # Gemini 3 Flash has 1M token context
 TASK_ANALYSIS_MAX_TOKENS: int = 1000000
 
 # --- Project Directory Helpers ---

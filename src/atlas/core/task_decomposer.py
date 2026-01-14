@@ -1,11 +1,17 @@
-"""LLM-assisted task decomposer for contract-driven DAGs."""
+"""LLM-assisted task decomposer for contract-driven DAGs.
+
+Enhanced with 9-variant diversity (3 personas × 3 temperatures) and
+mathematical ensemble merging using Jaccard clustering and set cover.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from dataclasses import dataclass, field
+from graphlib import TopologicalSorter, CycleError
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -16,17 +22,73 @@ from atlas.scout.repo_scout import RepoScoutReport
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# T-001: 9-Variant Configuration
+# =============================================================================
+
+DECOMPOSITION_PERSONAS: dict[str, str] = {
+    "ATOMIC_ARCHITECT": (
+        "You decompose into smallest independent units. Each task should be "
+        "completable in isolation with minimal dependencies. Focus on granular, "
+        "bottom-up decomposition. Every task must touch exactly one concern."
+    ),
+    "INTEGRATION_LEAD": (
+        "You think about interfaces and data flow first. Define tasks around "
+        "integration points and API boundaries. Focus on middle-out decomposition "
+        "where connections between components are explicit. Tasks should be defined "
+        "by the data they consume and produce."
+    ),
+    "TEST_FIRST_QA": (
+        "You start from test scenarios and work backward. First identify how to "
+        "verify the feature, then decompose into tasks that enable those verifications. "
+        "Focus on top-down decomposition where every task has clear acceptance criteria "
+        "based on testable outcomes."
+    ),
+}
+
+DECOMPOSITION_TEMPERATURES: list[float] = [0.3, 0.5, 0.8]
+
+
+@dataclass
+class MergeMetrics:
+    """Metrics from ensemble merge process (T-009)."""
+
+    variants_generated: int = 0
+    variants_valid: int = 0
+    clusters_formed: int = 0
+    tasks_selected: int = 0
+    gaps_filled: int = 0
+    final_task_count: int = 0
+    persona_contributions: dict[str, int] = field(default_factory=dict)
+    temperature_contributions: dict[float, int] = field(default_factory=dict)
+
+
 @dataclass
 class TaskDecomposerConfig:
     """Configuration for task decomposition."""
 
+    # Core settings
     max_tasks: int = 12
     require_oracles: bool = True
     require_contract: bool = True
     require_ownership: bool = True
-    num_variants: int = 3
+
+    # Variant generation (T-001)
+    num_variants: int = 9  # 3 personas × 3 temperatures for optimal diversity
+    num_personas: int = 3
+    num_temperatures: int = 3
+    temperatures: list[float] = field(default_factory=lambda: [0.3, 0.5, 0.8])
+
+    # Ensemble merging (T-001)
+    enable_ensemble_merge: bool = True
+    cluster_similarity_threshold: float = 0.6
+    min_oracle_count: int = 1
+
+    # Consensus (legacy, used when ensemble_merge disabled)
     min_consensus: float = 0.4
     min_coverage_ratio: float = 1.0
+
+    # Coverage targets
     max_keyword_hits: int = 5
     max_component_paths: int = 5
     include_entrypoints_in_coverage: bool = True
@@ -42,6 +104,10 @@ class TaskDecompositionCandidate:
     coverage_score: float = 0.0
     coverage_missing: list[str] = field(default_factory=list)
     consensus_score: float = 0.0
+
+    # T-002: Track variant origin for ensemble merge
+    persona: str = ""
+    temperature: float = 0.0
 
 
 class TaskDecomposer:
@@ -89,74 +155,129 @@ class TaskDecomposer:
             return self._fallback_dag(description, repo_report)
 
         prompt = self._build_prompt(description, repo_report, keywords, component_names)
-        candidates: list[TaskDecompositionCandidate] = []
-        num_variants = max(1, min(self.config.num_variants, 5))
 
-        for idx in range(num_variants):
-            temperature = 0.2 + (idx * 0.05)
-            result = await self.llm_client.generate_with_retry(
-                prompt=prompt,
-                system_prompt="You are a senior staff engineer decomposing work into verified tasks.",
-                temperature=temperature,
-                max_tokens=4000,
+        # T-002: Generate 3×3 variant matrix (personas × temperatures) in parallel
+        candidates = await self._generate_variant_matrix(
+            prompt, description, repo_report, keywords, component_names
+        )
+
+        # T-008: Use ensemble merge or legacy selection
+        if self.config.enable_ensemble_merge:
+            merged_dag, metrics = self._merge_candidates(candidates, repo_report, keywords, component_names)
+            if merged_dag is None:
+                logger.warning("Ensemble merge failed; using fallback DAG")
+                return self._fallback_dag(description, repo_report)
+
+            logger.info(
+                "Merged DAG: %d tasks from %d/%d valid variants, %d clusters, %d gaps filled",
+                metrics.final_task_count,
+                metrics.variants_valid,
+                metrics.variants_generated,
+                metrics.clusters_formed,
+                metrics.gaps_filled,
             )
+            return merged_dag
+        else:
+            # Legacy single-winner selection
+            selected = self._select_candidate(candidates)
+            if selected is None:
+                logger.warning("Decomposition too weak; using fallback DAG")
+                return self._fallback_dag(description, repo_report)
 
-            data = self._parse_json(result.text)
-            if not data:
-                candidates.append(
-                    TaskDecompositionCandidate(
-                        dag=self._fallback_dag(description, repo_report),
-                        source=f"variant_{idx + 1}",
-                        errors=["Failed to parse decomposition JSON"],
-                    )
-                )
-                continue
+            logger.info(
+                "Selected DAG from %s (consensus=%.2f, coverage=%.2f)",
+                selected.source,
+                selected.consensus_score,
+                selected.coverage_score,
+            )
+            return selected.dag
+
+    async def _generate_variant_matrix(
+        self,
+        prompt: str,
+        description: str,
+        repo_report: RepoScoutReport,
+        keywords: list[str],
+        component_names: list[str],
+    ) -> list[TaskDecompositionCandidate]:
+        """T-002: Generate 3×3 variant matrix (personas × temperatures) in parallel."""
+        personas = list(DECOMPOSITION_PERSONAS.items())[:self.config.num_personas]
+        temperatures = self.config.temperatures[:self.config.num_temperatures]
+
+        async def generate_variant(
+            persona_name: str,
+            persona_prompt: str,
+            temperature: float,
+            variant_idx: int,
+        ) -> TaskDecompositionCandidate:
+            """Generate a single variant with specific persona and temperature."""
+            source = f"{persona_name}_{temperature}"
+            system_prompt = (
+                f"You are a senior staff engineer decomposing work into verified tasks. "
+                f"{persona_prompt}"
+            )
 
             try:
-                dag = self._build_dag_from_json(data)
-            except Exception as exc:
-                candidates.append(
-                    TaskDecompositionCandidate(
-                        dag=self._fallback_dag(description, repo_report),
-                        source=f"variant_{idx + 1}",
-                        errors=[f"Failed to build TaskDAG: {exc}"],
-                    )
+                result = await self.llm_client.generate_with_retry(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=4000,
                 )
-                continue
 
-            coverage_score, coverage_missing = self._coverage_score(
-                dag,
-                repo_report,
-                keywords,
-                component_names,
-            )
-            errors = self._validate_candidate(
-                dag,
-                coverage_score,
-                coverage_missing,
-            )
-            candidates.append(
-                TaskDecompositionCandidate(
+                data = self._parse_json(result.text)
+                if not data:
+                    return TaskDecompositionCandidate(
+                        dag=self._fallback_dag(description, repo_report),
+                        source=source,
+                        errors=["Failed to parse decomposition JSON"],
+                        persona=persona_name,
+                        temperature=temperature,
+                    )
+
+                dag = self._build_dag_from_json(data)
+                coverage_score, coverage_missing = self._coverage_score(
+                    dag, repo_report, keywords, component_names
+                )
+                errors = self._validate_candidate(dag, coverage_score, coverage_missing)
+
+                return TaskDecompositionCandidate(
                     dag=dag,
-                    source=f"variant_{idx + 1}",
+                    source=source,
                     errors=errors,
                     coverage_score=coverage_score,
                     coverage_missing=coverage_missing,
+                    persona=persona_name,
+                    temperature=temperature,
                 )
-            )
+            except Exception as exc:
+                logger.warning("Variant %s failed: %s", source, exc)
+                return TaskDecompositionCandidate(
+                    dag=self._fallback_dag(description, repo_report),
+                    source=source,
+                    errors=[f"Generation failed: {exc}"],
+                    persona=persona_name,
+                    temperature=temperature,
+                )
 
-        selected = self._select_candidate(candidates)
-        if selected is None:
-            logger.warning("Decomposition too weak; using fallback DAG")
-            return self._fallback_dag(description, repo_report)
+        # Build all combinations and run in parallel
+        tasks = []
+        variant_idx = 0
+        for persona_name, persona_prompt in personas:
+            for temperature in temperatures:
+                tasks.append(
+                    generate_variant(persona_name, persona_prompt, temperature, variant_idx)
+                )
+                variant_idx += 1
 
+        candidates = await asyncio.gather(*tasks)
         logger.info(
-            "Selected DAG from %s (consensus=%.2f, coverage=%.2f)",
-            selected.source,
-            selected.consensus_score,
-            selected.coverage_score,
+            "Generated %d variants: %d valid, %d with errors",
+            len(candidates),
+            sum(1 for c in candidates if not c.errors),
+            sum(1 for c in candidates if c.errors),
         )
-        return selected.dag
+        return list(candidates)
 
     def _build_prompt(
         self,
@@ -393,10 +514,24 @@ class TaskDecomposer:
             return False
 
     def _normalize_path(self, path: str) -> str:
+        """Normalize file paths for cross-platform comparison."""
         normalized = path.replace("\\", "/").strip()
+
+        # Remove ./ prefix
         if normalized.startswith("./"):
             normalized = normalized[2:]
-        return normalized.lstrip("/")
+
+        # Remove leading slash
+        normalized = normalized.lstrip("/")
+
+        # Compress multiple consecutive slashes (src//api -> src/api)
+        while "//" in normalized:
+            normalized = normalized.replace("//", "/")
+
+        # Remove trailing slash for directories
+        normalized = normalized.rstrip("/")
+
+        return normalized
 
     def _select_candidate(
         self,
@@ -470,6 +605,315 @@ class TaskDecomposer:
         if not union:
             return 0.0
         return len(left & right) / len(union)
+
+    # =========================================================================
+    # T-003 to T-009: Mathematical Ensemble Merging
+    # =========================================================================
+
+    def _merge_candidates(
+        self,
+        candidates: list[TaskDecompositionCandidate],
+        repo_report: RepoScoutReport,
+        keywords: list[str],
+        component_names: list[str],
+    ) -> tuple[TaskDAG | None, MergeMetrics]:
+        """T-008: Merge best tasks from all valid variants using mathematical ensemble."""
+        metrics = MergeMetrics(variants_generated=len(candidates))
+
+        # Filter to valid candidates
+        valid = [c for c in candidates if not c.errors]
+        metrics.variants_valid = len(valid)
+
+        if not valid:
+            logger.warning("No valid variants to merge")
+            return None, metrics
+
+        # T-003: Extract all scopes across all variants
+        all_scopes = self._extract_all_scopes(valid)
+
+        # Collect all tasks from all valid variants with source tracking
+        all_tasks: list[tuple[TaskSpec, str, str, float]] = []
+        for candidate in valid:
+            for task in candidate.dag.tasks.values():
+                all_tasks.append((task, candidate.source, candidate.persona, candidate.temperature))
+
+        if not all_tasks:
+            logger.warning("No tasks found across valid variants")
+            return None, metrics
+
+        # T-004: Cluster similar tasks by Jaccard similarity on scopes
+        clusters = self._cluster_tasks(all_tasks)
+        metrics.clusters_formed = len(clusters)
+
+        # T-005: Vote for best task in each cluster
+        selected_tasks: list[TaskSpec] = []
+        for cluster in clusters:
+            representative, source, persona, temp = self._select_representative(cluster)
+            selected_tasks.append(representative)
+            metrics.persona_contributions[persona] = metrics.persona_contributions.get(persona, 0) + 1
+            metrics.temperature_contributions[temp] = metrics.temperature_contributions.get(temp, 0) + 1
+
+        metrics.tasks_selected = len(selected_tasks)
+
+        # T-006: Fill gaps with greedy set cover
+        covered_scopes = self._get_covered_scopes(selected_tasks)
+        gaps = all_scopes - covered_scopes
+
+        if gaps:
+            gap_fillers = self._fill_gaps(gaps, all_tasks, selected_tasks)
+            for filler, source, persona, temp in gap_fillers:
+                selected_tasks.append(filler)
+                metrics.persona_contributions[persona] = metrics.persona_contributions.get(persona, 0) + 1
+                metrics.temperature_contributions[temp] = metrics.temperature_contributions.get(temp, 0) + 1
+            metrics.gaps_filled = len(gap_fillers)
+
+        # T-007: Resolve dependencies with topological sort
+        sorted_tasks = self._resolve_dependencies(selected_tasks)
+
+        # Deduplicate task IDs to avoid conflicts
+        sorted_tasks = self._deduplicate_task_ids(sorted_tasks)
+
+        metrics.final_task_count = len(sorted_tasks)
+
+        # Build final DAG
+        try:
+            merged_dag = TaskDAG.from_list(sorted_tasks)
+            return merged_dag, metrics
+        except Exception as exc:
+            logger.error("Failed to build merged DAG: %s", exc)
+            return None, metrics
+
+    def _extract_all_scopes(
+        self,
+        candidates: list[TaskDecompositionCandidate],
+    ) -> set[str]:
+        """T-003: Union of all file scopes across all variants."""
+        all_scopes: set[str] = set()
+        for candidate in candidates:
+            for task in candidate.dag.tasks.values():
+                all_scopes.update(
+                    self._normalize_path(f) for f in task.ownership.allowed_files
+                )
+                all_scopes.update(
+                    self._normalize_path(d) for d in task.ownership.allowed_dirs
+                )
+                # Don't include broad globs like **/* as explicit scopes
+                for glob in task.ownership.allowed_globs:
+                    normalized = self._normalize_path(glob)
+                    if normalized not in {"*", "**", "**/*"}:
+                        all_scopes.add(normalized)
+        return all_scopes
+
+    def _task_scope_set(self, task: TaskSpec) -> set[str]:
+        """Get normalized scope set for a task (for Jaccard comparison)."""
+        scopes: set[str] = set()
+        scopes.update(self._normalize_path(f) for f in task.ownership.allowed_files)
+        scopes.update(self._normalize_path(d) for d in task.ownership.allowed_dirs)
+        for glob in task.ownership.allowed_globs:
+            normalized = self._normalize_path(glob)
+            if normalized not in {"*", "**", "**/*"}:
+                scopes.add(normalized)
+        return scopes
+
+    def _task_jaccard(self, task_a: TaskSpec, task_b: TaskSpec) -> float:
+        """T-004: Jaccard similarity between two tasks based on ownership scopes."""
+        scopes_a = self._task_scope_set(task_a)
+        scopes_b = self._task_scope_set(task_b)
+
+        if not scopes_a and not scopes_b:
+            return 1.0
+
+        union = scopes_a | scopes_b
+        if not union:
+            return 0.0
+
+        return len(scopes_a & scopes_b) / len(union)
+
+    def _cluster_tasks(
+        self,
+        all_tasks: list[tuple[TaskSpec, str, str, float]],
+    ) -> list[list[tuple[TaskSpec, str, str, float]]]:
+        """T-004: Group similar tasks into clusters using Jaccard threshold."""
+        if not all_tasks:
+            return []
+
+        threshold = self.config.cluster_similarity_threshold
+        clusters: list[list[tuple[TaskSpec, str, str, float]]] = []
+        assigned: set[int] = set()
+
+        for i, (task_i, source_i, persona_i, temp_i) in enumerate(all_tasks):
+            if i in assigned:
+                continue
+
+            # Start new cluster
+            cluster = [(task_i, source_i, persona_i, temp_i)]
+            assigned.add(i)
+
+            # Find all similar tasks
+            for j, (task_j, source_j, persona_j, temp_j) in enumerate(all_tasks):
+                if j in assigned:
+                    continue
+
+                similarity = self._task_jaccard(task_i, task_j)
+                if similarity >= threshold:
+                    cluster.append((task_j, source_j, persona_j, temp_j))
+                    assigned.add(j)
+
+            clusters.append(cluster)
+
+        return clusters
+
+    def _select_representative(
+        self,
+        cluster: list[tuple[TaskSpec, str, str, float]],
+    ) -> tuple[TaskSpec, str, str, float]:
+        """T-005: Pick best task from cluster by scoring."""
+
+        def score(entry: tuple[TaskSpec, str, str, float]) -> float:
+            task = entry[0]
+            # Oracle score: more oracles = better verifiability
+            oracle_score = len(task.oracles) * 10
+
+            # Specificity score: penalize wildcards
+            specificity = 10
+            for glob in task.ownership.allowed_globs:
+                if "**" in glob:
+                    specificity -= 2
+                elif "*" in glob:
+                    specificity -= 1
+
+            # Priority score (higher priority = higher score)
+            priority_score = task.priority
+
+            # Contract clarity: longer contracts often more specific
+            contract_score = min(len(task.contract) / 50, 5)
+
+            return oracle_score + specificity + priority_score + contract_score
+
+        return max(cluster, key=score)
+
+    def _get_covered_scopes(self, tasks: list[TaskSpec]) -> set[str]:
+        """Get all scopes covered by a list of tasks."""
+        covered: set[str] = set()
+        for task in tasks:
+            covered.update(self._normalize_path(f) for f in task.ownership.allowed_files)
+            covered.update(self._normalize_path(d) for d in task.ownership.allowed_dirs)
+            for glob in task.ownership.allowed_globs:
+                normalized = self._normalize_path(glob)
+                if normalized not in {"*", "**", "**/*"}:
+                    covered.add(normalized)
+        return covered
+
+    def _fill_gaps(
+        self,
+        gaps: set[str],
+        all_tasks: list[tuple[TaskSpec, str, str, float]],
+        already_selected: list[TaskSpec],
+    ) -> list[tuple[TaskSpec, str, str, float]]:
+        """T-006: Greedily add tasks to cover gaps (set cover algorithm)."""
+        selected_ids = {t.task_id for t in already_selected}
+        remaining_gaps = gaps.copy()
+        fillers: list[tuple[TaskSpec, str, str, float]] = []
+
+        while remaining_gaps:
+            best_entry = None
+            best_coverage = 0
+
+            for task, source, persona, temp in all_tasks:
+                # Skip if already selected
+                if task.task_id in selected_ids:
+                    continue
+
+                # Count how many gaps this task covers
+                task_scopes = self._task_scope_set(task)
+                coverage = len(task_scopes & remaining_gaps)
+
+                if coverage > best_coverage:
+                    best_coverage = coverage
+                    best_entry = (task, source, persona, temp)
+
+            if best_entry is None or best_coverage == 0:
+                # No task can cover remaining gaps
+                break
+
+            fillers.append(best_entry)
+            selected_ids.add(best_entry[0].task_id)
+            remaining_gaps -= self._task_scope_set(best_entry[0])
+
+        return fillers
+
+    def _resolve_dependencies(self, tasks: list[TaskSpec]) -> list[TaskSpec]:
+        """T-007: Topological sort to ensure valid task ordering."""
+        task_map = {t.task_id: t for t in tasks}
+        valid_ids = set(task_map.keys())
+
+        # First pass: sanitize dependencies to only valid IDs
+        for task in tasks:
+            task.dependencies = [d for d in task.dependencies if d in valid_ids]
+
+        # Build dependency graph
+        graph: dict[str, set[str]] = {t.task_id: set(t.dependencies) for t in tasks}
+
+        try:
+            sorter = TopologicalSorter(graph)
+            sorted_ids = list(sorter.static_order())
+            return [task_map[tid] for tid in sorted_ids if tid in task_map]
+        except CycleError as e:
+            # e.args[1] contains cycle path like ['a', 'b', 'a'] meaning a->b->a
+            cycle_nodes = e.args[1] if len(e.args) > 1 else []
+            logger.warning("Dependency cycle detected: %s. Breaking cycle.", cycle_nodes)
+
+            if cycle_nodes and len(cycle_nodes) >= 3:
+                # Cycle path is [node1, node2, ..., node1] where each depends on next
+                # To break a->b->a, remove the last edge: b's dependency on a
+                # That's cycle_nodes[-2] depends on cycle_nodes[-1]
+                source_id = cycle_nodes[-2]  # The task that has the problematic dependency
+                target_id = cycle_nodes[-1]  # The dependency to remove
+
+                if source_id in task_map:
+                    task = task_map[source_id]
+                    if target_id in task.dependencies:
+                        task.dependencies.remove(target_id)
+                        logger.info("Removed dependency %s -> %s to break cycle", source_id, target_id)
+
+                # Recursively try again after breaking the edge
+                return self._resolve_dependencies(tasks)
+            else:
+                # Fallback: if we can't identify the cycle, clear all deps and return
+                logger.warning("Could not identify cycle nodes, returning tasks without dependency ordering")
+                for task in tasks:
+                    task.dependencies = []
+                return tasks
+
+    def _deduplicate_task_ids(self, tasks: list[TaskSpec]) -> list[TaskSpec]:
+        """Ensure unique task IDs across merged tasks."""
+        seen_ids: dict[str, int] = {}
+        result: list[TaskSpec] = []
+
+        for task in tasks:
+            original_id = task.task_id
+            if original_id in seen_ids:
+                seen_ids[original_id] += 1
+                # Create new task with unique ID
+                new_id = f"{original_id}_{seen_ids[original_id]}"
+                task = TaskSpec(
+                    task_id=new_id,
+                    title=task.title,
+                    description=task.description,
+                    contract=task.contract,
+                    ownership=task.ownership,
+                    oracles=task.oracles,
+                    inputs=task.inputs,
+                    outputs=task.outputs,
+                    dependencies=task.dependencies,
+                    risk_level=task.risk_level,
+                    priority=task.priority,
+                )
+            else:
+                seen_ids[original_id] = 0
+            result.append(task)
+
+        return result
 
     def _extract_balanced_json(self, text: str) -> str | None:
         """Extract JSON object with balanced braces from text starting with {."""

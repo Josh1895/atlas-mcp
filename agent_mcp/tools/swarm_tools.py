@@ -72,7 +72,7 @@ RUN_SWARM_CONSENSUS_SCHEMA = {
                 },
                 "model": {
                     "type": "string",
-                    "default": "gemini-2.0-flash"
+                    "default": "gemini-3-flash-preview"
                 },
                 "temperature": {
                     "type": "number",
@@ -207,7 +207,7 @@ async def run_swarm_consensus_impl(arguments: Dict[str, Any]) -> List[mcp_types.
         swarm_config = SwarmConfig(
             agent_count=swarm_args.get("agent_count", 5),
             consensus_k=swarm_args.get("consensus_k", 2),
-            model=swarm_args.get("model", "gemini-2.0-flash"),
+            model=swarm_args.get("model", "gemini-3-flash-preview"),
             temperature=swarm_args.get("temperature", 0.7),
         )
 

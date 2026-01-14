@@ -60,7 +60,7 @@ class TestConfig:
         """Test default configuration values."""
         config = Config()
 
-        assert config.model == "gemini-2.5-flash"
+        assert config.model == "gemini-3-flash-preview"
         assert config.temperature == 0.7
         assert config.voting_k == 3
         assert config.max_samples == 5

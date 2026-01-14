@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 # Initialize the MCP server
 mcp = FastMCP(
-    "atlas",
-    description="ATLAS: Multi-agent code generation with consensus voting",
+    name="atlas",
+    instructions="ATLAS: Multi-agent code generation with consensus voting",
 )
 
 
@@ -586,6 +586,113 @@ async def speckit_implement(
         max_cost_usd=max_cost_usd,
         timeout_minutes=timeout_minutes,
     )
+
+
+@mcp.tool()
+async def speckit_execute(
+    repo_path: str,
+    feature_id: str,
+    branch: str = "main",
+    test_command: str | None = None,
+    max_cost_usd: float = 10.0,
+    timeout_minutes: int = 60,
+) -> dict[str, Any]:
+    """Execute a complete SpecKit implementation using ATLAS multi-agent system.
+
+    This is the all-in-one tool: takes a SpecKit and implements it fully.
+    Combines speckit_implement + solve_feature_dag into a single call.
+
+    Flow:
+    1. Loads your SpecKit (spec, plan, tasks)
+    2. Converts tasks to a TaskDAG with dependencies
+    3. Runs multi-agent consensus on each task in order
+    4. Assembles final patch from all task patches
+    5. Returns the complete implementation
+
+    Args:
+        repo_path: Path to the repository root (local path works).
+        feature_id: Feature identifier (must have spec, plan, tasks defined).
+        branch: Git branch to base changes on (default: main).
+        test_command: Command to run tests for validation (e.g., "pytest").
+        max_cost_usd: Maximum cost budget in USD (default: 10.0).
+        timeout_minutes: Maximum time in minutes (default: 60).
+
+    Returns:
+        Dictionary with:
+        - status: "completed", "failed", or "timeout"
+        - final_patch: The unified diff patch for the entire feature
+        - cost_usd: Total cost of all agent calls
+        - duration_seconds: Total execution time
+        - task_results: Summary of each task's implementation
+        - errors: Any errors encountered
+    """
+    # Step 1: Prepare the SpecKit (converts to dag_override)
+    prep_result = await speckit_tools.speckit_implement(
+        repo_path=repo_path,
+        feature_id=feature_id,
+        test_command=test_command,
+        max_cost_usd=max_cost_usd,
+        timeout_minutes=timeout_minutes,
+    )
+
+    # Check if preparation failed
+    if prep_result.get("status") != "ready":
+        return {
+            "status": "failed",
+            "error": prep_result.get("error", "SpecKit preparation failed"),
+            "details": prep_result,
+        }
+
+    # Step 2: Create the DAG submission with the converted tasks
+    dag_override = prep_result.get("dag_override")
+    description = prep_result.get("suggested_params", {}).get("description", f"Implement {feature_id}")
+
+    submission = TaskDAGSubmission(
+        description=description,
+        repository_url=repo_path,
+        branch=branch,
+        max_tasks=len(dag_override.get("tasks", [])) + 5,  # Allow some buffer
+        max_cost_usd=max_cost_usd,
+        timeout_minutes=timeout_minutes,
+        test_command=test_command,
+        dag_override=dag_override,
+    )
+
+    # Step 3: Execute with the DAG orchestrator
+    orchestrator = get_dag_orchestrator()
+
+    try:
+        result = await asyncio.wait_for(
+            orchestrator.solve(submission),
+            timeout=timeout_minutes * 60,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "status": "timeout",
+            "feature_id": feature_id,
+            "error": f"Execution timed out after {timeout_minutes} minutes",
+        }
+
+    # Step 4: Format and return results
+    task_results_summary = {
+        task_id: {
+            "selected_patch_id": task_result.selected_patch_id,
+            "candidate_count": len(task_result.candidates),
+            "errors": task_result.errors,
+        }
+        for task_id, task_result in result.task_results.items()
+    }
+
+    return {
+        "status": result.status,
+        "feature_id": feature_id,
+        "final_patch": result.final_patch,
+        "cost_usd": result.cost_usd,
+        "duration_seconds": result.duration_seconds,
+        "task_count": len(result.task_results),
+        "task_results": task_results_summary,
+        "errors": result.errors,
+    }
 
 
 @mcp.tool()
