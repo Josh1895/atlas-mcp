@@ -1,17 +1,15 @@
 """
 Repository Resolver for swarm operations.
 
-Supports both local (MCP_PROJECT_DIR) and remote (git clone) modes (AD-005).
-Local mode is default for Agent-MCP compatibility.
+Supports local paths only - no remote cloning.
+Local mode uses MCP_PROJECT_DIR or explicit paths.
 """
 
 import os
-import tempfile
-import shutil
 import subprocess
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 from contextlib import contextmanager
 
 from ...core.config import logger, get_project_dir
@@ -24,30 +22,10 @@ class ResolvedRepo:
     path: Path
     branch: Optional[str] = None
     commit: Optional[str] = None
-    is_temp: bool = False
-    worktree_path: Optional[Path] = None
 
     def cleanup(self) -> None:
-        """Clean up temporary resources."""
-        if self.worktree_path and self.worktree_path.exists():
-            try:
-                # Remove git worktree
-                subprocess.run(
-                    ["git", "worktree", "remove", str(self.worktree_path), "--force"],
-                    cwd=str(self.path),
-                    capture_output=True,
-                    timeout=30,
-                )
-            except Exception as e:
-                logger.warning(f"Failed to remove worktree: {e}")
-
-            # Force remove directory if still exists
-            if self.worktree_path.exists():
-                shutil.rmtree(self.worktree_path, ignore_errors=True)
-
-        if self.is_temp and self.path.exists():
-            shutil.rmtree(self.path, ignore_errors=True)
-            logger.debug(f"Cleaned up temp repo at {self.path}")
+        """Clean up resources (no-op for local repos)."""
+        pass
 
 
 class RepoResolverError(Exception):
@@ -59,10 +37,7 @@ class RepoResolver:
     """
     Resolves repository paths for swarm operations.
 
-    Supports:
-    - Local mode: Uses MCP_PROJECT_DIR
-    - Remote mode: Clones from URL to temp directory
-    - Worktree support for isolated patch application
+    Supports local mode only - uses MCP_PROJECT_DIR or explicit paths.
     """
 
     def __init__(self, config: Optional[RepoConfig] = None):
@@ -84,12 +59,7 @@ class RepoResolver:
         Raises:
             RepoResolverError: If resolution fails
         """
-        if self.config.mode == "local":
-            return self._resolve_local()
-        elif self.config.mode == "remote":
-            return self._resolve_remote()
-        else:
-            raise RepoResolverError(f"Unknown repo mode: {self.config.mode}")
+        return self._resolve_local()
 
     def _resolve_local(self) -> ResolvedRepo:
         """Resolve using local project directory."""
@@ -98,12 +68,12 @@ class RepoResolver:
         if not project_dir.exists():
             raise RepoResolverError(f"Project directory not found: {project_dir}")
 
-        # Check if it's a git repo
+        # Check if it's a git repo (optional, not required)
         git_dir = project_dir / ".git"
         if not git_dir.exists():
-            logger.warning(f"Project directory is not a git repo: {project_dir}")
+            logger.debug(f"Project directory is not a git repo: {project_dir}")
 
-        # Get current branch and commit
+        # Get current branch and commit if available
         branch = self._get_current_branch(project_dir)
         commit = self._get_current_commit(project_dir)
 
@@ -113,110 +83,7 @@ class RepoResolver:
             path=project_dir,
             branch=branch,
             commit=commit,
-            is_temp=False,
         )
-
-    def _resolve_remote(self) -> ResolvedRepo:
-        """Clone remote repository to temp directory."""
-        if not self.config.url:
-            raise RepoResolverError("Remote mode requires a URL")
-
-        # Create temp directory
-        temp_dir = Path(tempfile.mkdtemp(prefix="swarm_repo_"))
-        logger.debug(f"Cloning {self.config.url} to {temp_dir}")
-
-        try:
-            # Clone the repo
-            clone_args = ["git", "clone"]
-
-            if self.config.branch:
-                clone_args.extend(["--branch", self.config.branch])
-
-            clone_args.extend(["--depth", "1", self.config.url, str(temp_dir)])
-
-            result = subprocess.run(
-                clone_args,
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 minute timeout for clone
-            )
-
-            if result.returncode != 0:
-                raise RepoResolverError(f"Git clone failed: {result.stderr}")
-
-            # Checkout specific commit if provided
-            if self.config.commit:
-                # Need to fetch the specific commit first (since we did shallow clone)
-                subprocess.run(
-                    ["git", "fetch", "--depth", "1", "origin", self.config.commit],
-                    cwd=str(temp_dir),
-                    capture_output=True,
-                    timeout=60,
-                )
-
-                result = subprocess.run(
-                    ["git", "checkout", self.config.commit],
-                    cwd=str(temp_dir),
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-
-                if result.returncode != 0:
-                    raise RepoResolverError(f"Git checkout failed: {result.stderr}")
-
-            branch = self._get_current_branch(temp_dir)
-            commit = self._get_current_commit(temp_dir)
-
-            logger.info(f"Cloned remote repo to {temp_dir} (branch={branch}, commit={commit[:8] if commit else 'N/A'})")
-
-            return ResolvedRepo(
-                path=temp_dir,
-                branch=branch,
-                commit=commit,
-                is_temp=True,
-            )
-
-        except subprocess.TimeoutExpired:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise RepoResolverError("Git clone timed out")
-        except Exception as e:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise RepoResolverError(f"Failed to clone repo: {e}")
-
-    def create_worktree(self, resolved: ResolvedRepo, name: str) -> Path:
-        """
-        Create an isolated git worktree for patch application.
-
-        Args:
-            resolved: The resolved repository
-            name: Name for the worktree (used as suffix)
-
-        Returns:
-            Path to the worktree directory
-        """
-        worktree_dir = resolved.path.parent / f"{resolved.path.name}_worktree_{name}"
-
-        try:
-            # Create worktree
-            result = subprocess.run(
-                ["git", "worktree", "add", str(worktree_dir), "HEAD", "--detach"],
-                cwd=str(resolved.path),
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-
-            if result.returncode != 0:
-                raise RepoResolverError(f"Failed to create worktree: {result.stderr}")
-
-            resolved.worktree_path = worktree_dir
-            logger.debug(f"Created worktree at {worktree_dir}")
-
-            return worktree_dir
-
-        except subprocess.TimeoutExpired:
-            raise RepoResolverError("Git worktree creation timed out")
 
     def _get_current_branch(self, repo_path: Path) -> Optional[str]:
         """Get the current branch name."""
@@ -325,13 +192,12 @@ def temporary_repo(config: RepoConfig):
     """
     Context manager for working with a resolved repository.
 
-    Automatically cleans up temp resources on exit.
+    For local repos, this is a simple passthrough with no cleanup needed.
 
     Usage:
         with temporary_repo(config) as resolved:
             # Work with resolved.path
             pass
-        # Cleanup happens automatically
     """
     resolver = RepoResolver(config)
     resolved = resolver.resolve()

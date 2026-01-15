@@ -453,15 +453,14 @@ class ATLASOrchestrator:
         task: TaskSubmission,
         trace: ExecutionTrace,
     ) -> Tuple[Optional[str], Optional[Path], Optional[RepoContext]]:
-        """Clone the repository and extract intelligent context.
+        """Copy the local repository and extract intelligent context.
 
         This replaces the old "first 10 files" approach with:
-        - Proper base_commit support (full clone if needed)
         - Intelligent file selection based on issue keywords
         - Symbol and import analysis
 
         Args:
-            task: The task submission
+            task: The task submission (must have local path in repository_url)
             trace: Execution trace for logging
 
         Returns:
@@ -472,70 +471,35 @@ class ATLASOrchestrator:
             temp_dir = tempfile.mkdtemp(prefix="atlas_repo_")
             repo_path = Path(temp_dir) / "repo"
 
-            # Check if repository_url is a local path
+            # Validate that repository_url is a local path
             local_path = Path(task.repository_url)
-            is_local = local_path.exists() and local_path.is_dir()
+            if not local_path.exists():
+                logger.error(f"Local path does not exist: {task.repository_url}")
+                trace.errors.append(f"Local path does not exist: {task.repository_url}")
+                return None, None, None
 
-            if is_local:
-                # Local repository - copy to temp directory
-                logger.info(f"Using local repository: {task.repository_url}")
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(
-                    None,
-                    lambda: shutil.copytree(
-                        local_path,
-                        repo_path,
-                        ignore=shutil.ignore_patterns('.git', '__pycache__', 'node_modules', '.venv', 'venv'),
-                    ),
-                )
-                # Initialize as git repo if not already
-                if not (repo_path / ".git").exists():
-                    git.Repo.init(repo_path)
-                    repo = git.Repo(repo_path)
-                    repo.index.add("*")
-                    repo.index.commit("ATLAS: Initial commit from local")
-            else:
-                # Remote repository - clone it
-                logger.info(f"Cloning {task.repository_url}")
+            if not local_path.is_dir():
+                logger.error(f"Path is not a directory: {task.repository_url}")
+                trace.errors.append(f"Path is not a directory: {task.repository_url}")
+                return None, None, None
 
-                # Determine clone depth
-                # If base_commit is specified, we need a full clone (or fetch that commit)
-                use_shallow = task.base_commit is None
-                clone_depth = 1 if use_shallow else None
-
-                # Run git clone in executor
-                loop = asyncio.get_running_loop()
-
-                if clone_depth:
-                    await loop.run_in_executor(
-                        None,
-                        lambda: git.Repo.clone_from(
-                            task.repository_url,
-                            repo_path,
-                            branch=task.branch,
-                            depth=clone_depth,
-                        ),
-                    )
-                else:
-                    # Full clone for base_commit support
-                    await loop.run_in_executor(
-                        None,
-                        lambda: git.Repo.clone_from(
-                            task.repository_url,
-                            repo_path,
-                            branch=task.branch,
-                        ),
-                    )
-
-            # If a specific commit is requested, check it out
-            if task.base_commit:
+            # Local repository - copy to temp directory
+            logger.info(f"Using local repository: {task.repository_url}")
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: shutil.copytree(
+                    local_path,
+                    repo_path,
+                    ignore=shutil.ignore_patterns('.git', '__pycache__', 'node_modules', '.venv', 'venv'),
+                ),
+            )
+            # Initialize as git repo if not already (for patch application)
+            if not (repo_path / ".git").exists():
+                git.Repo.init(repo_path)
                 repo = git.Repo(repo_path)
-                try:
-                    repo.git.checkout(task.base_commit)
-                    logger.info(f"Checked out commit {task.base_commit}")
-                except git.GitCommandError as e:
-                    logger.warning(f"Failed to checkout {task.base_commit}: {e}")
-                    trace.warnings.append(f"Could not checkout {task.base_commit}, using HEAD")
+                repo.index.add("*")
+                repo.index.commit("ATLAS: Initial commit from local")
 
             # Use intelligent context extraction
             logger.info("Analyzing repository for relevant context")
@@ -568,14 +532,9 @@ class ATLASOrchestrator:
 
             return temp_dir, repo_path, repo_context
 
-        except git.GitCommandError as e:
-            logger.error(f"Git clone failed: {e}")
-            trace.errors.append(f"Git clone failed: {e}")
-            return None, None, None
-
         except Exception as e:
-            logger.error(f"Repository extraction failed: {e}")
-            trace.errors.append(f"Repository extraction failed: {e}")
+            logger.error(f"Repository analysis failed: {e}")
+            trace.errors.append(f"Repository analysis failed: {e}")
             return None, None, None
 
     def _format_context_for_agents(self, repo_context: RepoContext) -> str:

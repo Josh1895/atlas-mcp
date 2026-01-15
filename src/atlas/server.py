@@ -82,23 +82,25 @@ async def solve_issue(
     test_command: str | None = None,
     max_cost_usd: float = 2.0,
     timeout_minutes: int = 15,
+    auto_apply: bool = False,
 ) -> dict[str, Any]:
     """Solve an issue using multi-agent consensus.
 
     Generates patches using multiple diverse AI agents, validates them,
     and uses voting to select the best solution.
 
-    Works with both local paths and remote git URLs.
+    Works with local paths only.
 
     Args:
-        repo_path: Local folder path (e.g., "./my-project") OR git URL
+        repo_path: Local folder path (e.g., "./my-project" or "C:/projects/myapp")
         issue_description: Natural language description of the issue to fix
-        branch: Target branch (default: main)
+        branch: Target branch for git metadata (default: main)
         base_commit: Specific commit to base the fix on (optional)
         relevant_files: List of files likely to need changes (optional)
         test_command: Command to run tests (optional, used as primary oracle)
         max_cost_usd: Maximum cost budget in USD (default: 2.0)
         timeout_minutes: Maximum time in minutes (default: 15)
+        auto_apply: If True, automatically apply the patch to repo_path (default: False)
 
     Returns:
         Dictionary with task_id and initial status.
@@ -142,7 +144,29 @@ async def solve_issue(
             timeout=timeout_minutes * 60,
         )
 
-        return result.to_dict()
+        response = result.to_dict()
+
+        # Auto-apply patch if requested and successful
+        if auto_apply and result.status == TaskStatus.COMPLETED and result.patch:
+            from pathlib import Path as FilePath
+            from atlas.verification.patch_applier import PatchApplier
+
+            applier = PatchApplier()
+            apply_result = applier.apply_patch_to_directory(
+                result.patch,
+                FilePath(repo_path),
+                output_path=None,  # Apply in-place
+            )
+            response["auto_applied"] = apply_result.success
+            response["files_modified"] = apply_result.files_modified
+            response["files_created"] = apply_result.files_created
+            response["files_deleted"] = apply_result.files_deleted
+            if apply_result.errors:
+                response["apply_errors"] = apply_result.errors
+            if apply_result.warnings:
+                response["apply_warnings"] = apply_result.warnings
+
+        return response
 
     except asyncio.TimeoutError:
         return {
@@ -167,6 +191,7 @@ async def solve_file(
     additional_files: list[str] | None = None,
     max_cost_usd: float = 1.0,
     timeout_minutes: int = 5,
+    auto_apply: bool = False,
 ) -> dict[str, Any]:
     """Fix issues in a single file or small set of files.
 
@@ -179,6 +204,7 @@ async def solve_file(
         additional_files: Other files to include as context (optional)
         max_cost_usd: Maximum cost budget (default: 1.0)
         timeout_minutes: Maximum time (default: 5)
+        auto_apply: If True, automatically apply the patch to the file (default: False)
 
     Returns:
         Dictionary with:
@@ -289,7 +315,7 @@ Generate a unified diff patch that fixes the issue.""",
 
         total_cost = sum(s.cost for s in solutions if isinstance(s, Solution))
 
-        return {
+        response = {
             "status": "completed",
             "file": str(main_path),
             "patch": best.patch,
@@ -298,6 +324,24 @@ Generate a unified diff patch that fixes the issue.""",
             "agents_run": len(solutions),
             "valid_patches": len(valid_solutions),
         }
+
+        # Auto-apply patch if requested
+        if auto_apply and best.patch:
+            from atlas.verification.patch_applier import PatchApplier
+
+            applier = PatchApplier()
+            apply_result = applier.apply_patch_to_directory(
+                best.patch,
+                main_path.parent,  # Apply relative to file's directory
+                output_path=None,  # Apply in-place
+            )
+            response["auto_applied"] = apply_result.success
+            response["files_modified"] = apply_result.files_modified
+            response["files_created"] = apply_result.files_created
+            if apply_result.errors:
+                response["apply_errors"] = apply_result.errors
+
+        return response
 
     except asyncio.TimeoutError:
         return {
@@ -321,6 +365,7 @@ async def solve_folder(
     max_files: int = 10,
     max_cost_usd: float = 2.0,
     timeout_minutes: int = 10,
+    auto_apply: bool = False,
 ) -> dict[str, Any]:
     """Fix issues in a local folder of files.
 
@@ -335,6 +380,7 @@ async def solve_folder(
         max_files: Maximum number of files to include (default: 10)
         max_cost_usd: Maximum cost budget (default: 2.0)
         timeout_minutes: Maximum time (default: 10)
+        auto_apply: If True, automatically apply the patch to the folder (default: False)
 
     Returns:
         Dictionary with:
@@ -483,7 +529,7 @@ Generate a unified diff patch that fixes the issue.""",
         best = max(valid_solutions, key=lambda s: len(s.patch))
         total_cost = sum(s.cost for s in solutions if isinstance(s, Solution))
 
-        return {
+        response = {
             "status": "completed",
             "folder": str(folder),
             "patch": best.patch,
@@ -493,6 +539,24 @@ Generate a unified diff patch that fixes the issue.""",
             "agents_run": len(solutions),
             "valid_patches": len(valid_solutions),
         }
+
+        # Auto-apply patch if requested
+        if auto_apply and best.patch:
+            from atlas.verification.patch_applier import PatchApplier
+
+            applier = PatchApplier()
+            apply_result = applier.apply_patch_to_directory(
+                best.patch,
+                folder,
+                output_path=None,  # Apply in-place
+            )
+            response["auto_applied"] = apply_result.success
+            response["files_modified"] = apply_result.files_modified
+            response["files_created"] = apply_result.files_created
+            if apply_result.errors:
+                response["apply_errors"] = apply_result.errors
+
+        return response
 
     except asyncio.TimeoutError:
         return {
@@ -523,18 +587,19 @@ async def solve_feature_dag(
     test_command: str | None = None,
     review_only: bool = False,
     dag_override: dict | list | str | None = None,
+    auto_apply: bool = False,
 ) -> dict[str, Any]:
     """Solve a feature request using TaskDAG decomposition and assembly.
 
     Breaks complex features into smaller tasks, solves each with multi-agent
     consensus, then assembles the final patch.
 
-    Works with both local paths and remote git URLs.
+    Works with local paths only.
 
     Args:
-        repo_path: Local folder path (e.g., "./my-project") OR git URL
+        repo_path: Local folder path (e.g., "./my-project" or "C:/projects/myapp")
         description: Description of the feature to implement
-        branch: Target branch (default: main)
+        branch: Target branch for git metadata (default: main)
         base_commit: Specific commit to base changes on (optional)
         max_tasks: Maximum number of sub-tasks to create (default: 12)
         max_cost_usd: Maximum cost budget in USD (default: 10.0)
@@ -544,6 +609,7 @@ async def solve_feature_dag(
         test_command: Command to run tests (optional)
         review_only: If True, only generate DAG without implementing (default: False)
         dag_override: Override the auto-generated DAG (optional)
+        auto_apply: If True, automatically apply the patch to repo_path (default: False)
 
     Returns:
         Dictionary with final_patch, cost, and task results.
@@ -604,7 +670,7 @@ async def solve_feature_dag(
         for task_id, task_result in result.task_results.items()
     }
 
-    return {
+    response = {
         "task_id": result.task_id,
         "status": result.status,
         "final_patch": result.final_patch,
@@ -614,6 +680,28 @@ async def solve_feature_dag(
         "task_results": task_results_summary,
         "errors": result.errors,
     }
+
+    # Auto-apply patch if requested and successful
+    if auto_apply and result.status == "completed" and result.final_patch:
+        from pathlib import Path as FilePath
+        from atlas.verification.patch_applier import PatchApplier
+
+        applier = PatchApplier()
+        apply_result = applier.apply_patch_to_directory(
+            result.final_patch,
+            FilePath(repo_path),
+            output_path=None,  # Apply in-place
+        )
+        response["auto_applied"] = apply_result.success
+        response["files_modified"] = apply_result.files_modified
+        response["files_created"] = apply_result.files_created
+        response["files_deleted"] = apply_result.files_deleted
+        if apply_result.errors:
+            response["apply_errors"] = apply_result.errors
+        if apply_result.warnings:
+            response["apply_warnings"] = apply_result.warnings
+
+    return response
 
 
 @mcp.tool()
@@ -970,6 +1058,7 @@ async def speckit_execute(
     test_command: str | None = None,
     max_cost_usd: float = 10.0,
     timeout_minutes: int = 60,
+    auto_apply: bool = False,
 ) -> dict[str, Any]:
     """Execute a complete SpecKit implementation using ATLAS multi-agent system.
 
@@ -990,6 +1079,7 @@ async def speckit_execute(
         test_command: Command to run tests for validation (e.g., "pytest").
         max_cost_usd: Maximum cost budget in USD (default: 10.0).
         timeout_minutes: Maximum time in minutes (default: 60).
+        auto_apply: If True, automatically apply the patch to repo_path (default: False).
 
     Returns:
         Dictionary with:
@@ -1057,7 +1147,7 @@ async def speckit_execute(
         for task_id, task_result in result.task_results.items()
     }
 
-    return {
+    response = {
         "status": result.status,
         "feature_id": feature_id,
         "final_patch": result.final_patch,
@@ -1067,6 +1157,28 @@ async def speckit_execute(
         "task_results": task_results_summary,
         "errors": result.errors,
     }
+
+    # Auto-apply patch if requested and successful
+    if auto_apply and result.status == "completed" and result.final_patch:
+        from pathlib import Path as FilePath
+        from atlas.verification.patch_applier import PatchApplier
+
+        applier = PatchApplier()
+        apply_result = applier.apply_patch_to_directory(
+            result.final_patch,
+            FilePath(repo_path),
+            output_path=None,  # Apply in-place
+        )
+        response["auto_applied"] = apply_result.success
+        response["files_modified"] = apply_result.files_modified
+        response["files_created"] = apply_result.files_created
+        response["files_deleted"] = apply_result.files_deleted
+        if apply_result.errors:
+            response["apply_errors"] = apply_result.errors
+        if apply_result.warnings:
+            response["apply_warnings"] = apply_result.warnings
+
+    return response
 
 
 @mcp.tool()

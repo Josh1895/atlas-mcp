@@ -425,7 +425,7 @@ class AgenticGeminiClient:
         loop = asyncio.get_running_loop()
 
         for iteration in range(max_iterations):
-            # Call Gemini with retry logic for 503 errors
+            # Call Gemini with retry logic for server errors (500, 502, 503, 504)
             response = None
             for retry in range(5):
                 try:
@@ -439,9 +439,11 @@ class AgenticGeminiClient:
                     )
                     break
                 except Exception as e:
-                    if "503" in str(e) or "overloaded" in str(e).lower():
-                        wait_time = (2 ** retry) + 1
-                        logger.warning(f"Gemini overloaded, retry {retry+1}/5 in {wait_time}s...")
+                    error_str = str(e).lower()
+                    is_server_error = any(code in error_str for code in ["500", "502", "503", "504", "overloaded", "unavailable", "internal"])
+                    if is_server_error:
+                        wait_time = (2 ** retry) * 3 + 1  # Longer backoff: 4s, 7s, 13s, 25s, 49s
+                        logger.warning(f"Gemini server error ({e}), retry {retry+1}/5 in {wait_time}s...")
                         await asyncio.sleep(wait_time)
                     else:
                         raise

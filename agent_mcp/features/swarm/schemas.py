@@ -46,9 +46,7 @@ class MemoryConfig:
 
 @dataclass
 class RepoConfig:
-    """Repository configuration for patch mode."""
-    mode: str = "local"  # "local" or "remote"
-    url: Optional[str] = None
+    """Repository configuration for patch mode (local paths only)."""
     branch: Optional[str] = None
     commit: Optional[str] = None
     test_command: Optional[str] = None

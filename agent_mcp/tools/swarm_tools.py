@@ -40,14 +40,8 @@ RUN_SWARM_CONSENSUS_SCHEMA = {
         },
         "repo": {
             "type": "object",
-            "description": "Repository configuration for patch mode",
+            "description": "Repository configuration (uses local MCP_PROJECT_DIR)",
             "properties": {
-                "mode": {
-                    "type": "string",
-                    "enum": ["local", "remote"],
-                    "default": "local"
-                },
-                "url": {"type": "string"},
                 "branch": {"type": "string"},
                 "commit": {"type": "string"},
                 "test_command": {"type": "string"}
@@ -192,11 +186,9 @@ async def run_swarm_consensus_impl(arguments: Dict[str, Any]) -> List[mcp_types.
         mode_str = arguments.get("mode", "patch")
         mode = SwarmMode.PATCH if mode_str == "patch" else SwarmMode.ANSWER
 
-        # Parse repo config
+        # Parse repo config (local paths only)
         repo_args = arguments.get("repo", {})
         repo_config = RepoConfig(
-            mode=repo_args.get("mode", "local"),
-            url=repo_args.get("url"),
             branch=repo_args.get("branch"),
             commit=repo_args.get("commit"),
             test_command=repo_args.get("test_command"),
